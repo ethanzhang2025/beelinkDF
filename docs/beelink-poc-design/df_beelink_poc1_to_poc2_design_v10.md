@@ -197,7 +197,9 @@ DataConnector.from_loader(
 `handle_search_data_tables(query, scope, workspace)`（context.py:287）：
 
 - **Layer 1**：workspace 内已导入表的元数据搜索（描述、列名）
-- **Layer 2**：`<user_home>/catalog_cache/<source_id>/` 磁盘缓存搜索
+- **Layer 2**：`<workspace_root>/catalog_cache/<safe_source_id>.json` 磁盘缓存搜索
+  （单 JSON 文件含 `{source_id, synced_at, tables[...]}`；`safe_source_id` 由
+  `naming.safe_source_id` 把 `:` 转 `--`、`/\` 转 `_`。v10 初稿误写为"子目录每表一文件"，已据 `datalake/catalog_cache.py:6-46` 修正）
 
 磁盘 cache 由 `POST /api/connectors/sync-catalog-metadata` 触发 → `save_catalog(user_home, source_id, flat_tables)` 写入。
 
@@ -1502,6 +1504,92 @@ POC-1、POC-1.5、POC-2 均**不需要改 beelink**。以下是**可选**优化�
 
 * ❌ POC-2 / NL → Dremio SQL（DataAgent 工具扩展）
 * ❌ DataAgent 任何改动
+* ❌ 前端 UI 任何改动
+* ❌ beelink Java 任何改动
+* ❌ SQL Guard / SQL 修复 Agent / 强 BO / 强 RAG / MCP-first
+
+### 14.8 POC-2A 独立后端 NL2SQL API 实现与验收记录（2026-05-19）
+
+> 本节记录 POC-2A 的实现事实与本机真机验收证据。仍**不**包含 POC-2B / POC-2C；
+> DataAgent / 前端 / beelink Java 零改动。
+
+**定位（重要边界）**
+
+* POC-2A = **独立后端 REST API**：用户自然语言 → LLM 生成 Dremio SQL → beelink
+  执行 → 落 workspace。
+* **不接 DataAgent**：自带最小 system prompt，LLM 调用**不传 tools**，与
+  `agents/data_agent.py` 的 8 个 tool 全集解耦。
+* `model` 字段从请求 body 传入（与 `/api/agent/data-agent-streaming` 同款契约），
+  服务端用 `routes.agents.get_client(model_config)` 构造 LLM client；本轮真机
+  使用 DeepSeek Pro 的 OpenAI-compatible API（`endpoint="openai"`,
+  `api_base="https://api.deepseek.com"`, `model="deepseek-v4-pro"`）。
+* schema context **不依赖 catalog_cache**：调用方在 `table_keys[]` 里显式列出
+  要给 LLM 看的表；helper 现调 `loader.get_column_types(table_key)` 拉 schema，
+  最多 10 张表 × 30 列，不注入 sample rows。
+* SQL **由 LLM 生成，由 beelink 执行与裁权**；DF 不解析、不优化 SQL；浅校验只
+  拦非 SELECT/WITH（剥前导空白/单行注释/块注释后首 token），不做 AST/SQL Guard。
+* 数据写入路径**与 POC-1.5 一致**：`loader.fetch_sql_as_arrow → workspace.write_parquet_from_arrow`；
+  `TableMetadata.source_query = 生成的 SQL`、`source_table = null`、
+  `import_options.nl2sql_question = 原始自然语言问题`。
+* **不抽 import-sql helper**：POC-2A 直接复用 `BeelinkDataLoader.fetch_sql_as_arrow`
+  + `workspace.write_parquet_from_arrow`，与 POC-1.5 import-sql 行为锁定一致；
+  抽 helper 留给 POC-2B（届时 query_beelink_sql tool handler 会三方共享同段逻辑）。
+
+**最小后端实现**
+
+1. 新建 `py-src/data_formulator/agents/nl2sql.py`（约 240 行）：
+   - `NL2SQL_SYSTEM_PROMPT` 常量：要求 LLM 输出 **JSON-only**
+     （`{sql, rationale}` 或 `{sql:null, rationale, needs_clarification}`），
+     约束首 token 为 SELECT/WITH，多段表名用双引号，禁用 INSERT/UPDATE/DELETE/
+     DROP/CREATE/ALTER/TRUNCATE/MERGE/GRANT。
+   - `_is_select_or_with(sql)`：浅校验，剥前导空白 + `--` / `/* */` 注释后首
+     word token 必须是 SELECT 或 WITH。
+   - `_parse_json_response(text)`：支持纯 JSON / markdown 围栏 / 含散文但中间
+     有完整 `{...}` 块三种形态；非 dict 抛错。
+   - `_format_table_schema(table_key, col_types)`：用 POC-1 加固后已做的
+     Arrow→SQL 类型映射（前端拿到 `VARCHAR/INTEGER/TIMESTAMP` 而非 Arrow 字面量）。
+   - `_call_llm_for_sql(client, messages)`：与 `data_agent._call_llm_once` 同款
+     双后端分支（openai SDK / litellm），但**不传 tools**。
+   - `run_nl2sql(client, loader, workspace, question, table_keys, table_name,
+     import_options)`：核心 pipeline，含 JSON 解析失败 retry-once（追加 system
+     提示）；`sql=null` 且 `needs_clarification` 走 clarification 路径不写
+     workspace；SQL 浅校验失败抛 ValueError → route 层落 INVALID_REQUEST。
+
+2. `data_connector.py` 新增 `POST /api/connectors/nl2sql-import`（约 80 行）：
+   - **Body**：`{connector_id, question, table_keys[], table_name, model, import_options?}`
+   - 校验：`question` / `table_keys`（1-10 个，元素必须非空字符串）/ `table_name`
+     / `model`（dict）；缺任一返回 `INVALID_REQUEST`。
+   - 复用 `_resolve_connector` + `source._require_loader()` + `get_identity_id`
+     + `get_workspace` + `json_ok` + `classify_and_raise_connector_error`（与
+     import-sql 完全同模式）。
+   - LLM client 由 `routes.agents.get_client(model_config)` 构造。
+   - 返回 `{table_name, row_count, columns, sql, source_query, rationale, refreshable:false}`
+     或 clarification 路径下 `{sql:null, rationale, needs_clarification}`。
+
+3. **未触碰**：`data_agent.py` / `context.py` / `routes/agents.py`（仅 import
+   `get_client`，未改）/ `beelink_data_loader.py` / `import-sql` / `import-data`
+   / 前端 `src/` / beelink Java。
+
+**真机验收（feat/beelink-poc2-nl2sql；DeepSeek Pro + 本机 beelink :8998 + DF :5500）**
+
+| # | 操作 | 结果 |
+|---|------|------|
+| 1 | 路由 `import-sql / import-data` 仍挂载，且 `nl2sql-import` 已挂上 | ✓ |
+| 2-8 | 7 个 INVALID_REQUEST/CONNECTOR_ERROR 错误分支（缺 connector_id / question / table_keys / table_name / model，table_keys=11 个，table_keys 含非 str，connector 不存在）| 全 ✓ |
+| 9 | 用例 1：`question="展示 smartquery_demo.customers 前 10 行"` + `table_keys=["smartquery_demo.customers"]` + `import_options.size=10` | success；row_count=10；6 列；SQL=`SELECT * FROM "smartquery_demo"."customers" LIMIT 10`；source_query==sql；refreshable=false |
+| 10 | 用例 2：`question="按 gender 统计客户数"` | success；row_count=3；列=`[gender, cnt]`；SQL=`SELECT gender, COUNT(*) AS cnt FROM "smartquery_demo"."customers" GROUP BY gender`；样本 `[{男:975},{未知:36},{女:989}]` 中文 UTF-8 完整 |
+| 11 | 用例 3：`question="按 age_group 统计客户数"` | success；row_count=5；列=`[age_group, cnt]`；SQL 形如 `... GROUP BY age_group` |
+| 12 | 用例 4：`question="删除 customers 表"` | success（**未执行**）；DeepSeek Pro 自己拒绝 → 返回 `sql=null, rationale="删除表属于破坏性操作，系统不允许执行。", needs_clarification="您是要查看 customers 表的数据，还是要进行其他查询？"`；workspace 零写入。**此路径比硬拦截更友好；后端浅校验 `_is_select_or_with` 也会兜底拦非 SELECT/WITH** |
+| 13 | metadata 落地：`q_customers_by_gender` | `data_loader_type=BeelinkDataLoader`；`source_table_name=null`；`source_query` 等于实际 SQL；`data_loader_params={base_url, user, verify_ssl}`（**密码已剔除**）；`import_options.nl2sql_question="按 gender 统计客户数"` |
+| 14 | `/api/tables/list-tables` | 同时看到 POC-1 `customers`(1000)、POC-1.5 `customers_sql_poc15`(10)、POC-2A 三张新表 `q_top10_customers(10) / q_customers_by_gender(3) / q_customers_by_age_group(5)` |
+| 15 | POC-1.5 import-sql 回归（`SELECT 42 AS n`）| success；row_count=1；source_query 正确 |
+| 16 | POC-1 import-data 回归（smartquery_demo.customers size=5）| success；row_count=5；refreshable=true（POC-1 行为不变） |
+
+**当前边界（明确不包含）**
+
+* ❌ POC-2B（DataAgent `query_beelink_sql` tool 接入）
+* ❌ POC-2C（错误修复自循环）
+* ❌ DataAgent / `context.py` / `routes/agents.py` 任何业务改动（仅 import 复用 `get_client`）
 * ❌ 前端 UI 任何改动
 * ❌ beelink Java 任何改动
 * ❌ SQL Guard / SQL 修复 Agent / 强 BO / 强 RAG / MCP-first

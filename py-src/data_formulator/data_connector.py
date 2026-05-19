@@ -1679,6 +1679,87 @@ def connector_import_sql():
         classify_and_raise_connector_error(e, operation="import")
 
 
+@connectors_bp.route("/api/connectors/nl2sql-import", methods=["POST"])
+def connector_nl2sql_import():
+    """POC-2A：独立后端 NL → Dremio SQL → 执行 → workspace。
+
+    与 ``import-sql`` 的差异：
+    * 入参用 ``question``（自然语言）+ ``table_keys``（用户指定哪些表给 LLM 看）
+      而非直接 ``sql``；SQL 由 LLM 根据 schema context 生成（**不接 DataAgent**）。
+    * ``model`` 字段必填（与 /api/agent/data-agent-streaming 同款契约，传给
+      ``get_client(model_config)`` 构造 LLM client）。
+    * 若 LLM 判断信息不足，返回 ``{sql:null, needs_clarification:...}``，
+      不写 workspace；否则与 import-sql 同款写入（``source_query=sql``）。
+
+    Body
+    ----
+    ``{connector_id, question, table_keys[], table_name, model, import_options?}``
+
+    需要 loader 同时实现 ``get_column_types`` 与 ``fetch_sql_as_arrow``；当前
+    仅 BeelinkDataLoader 满足。
+    """
+    data = request.get_json() or {}
+    source = _resolve_connector(data)
+
+    try:
+        loader = source._require_loader()
+
+        question = data.get("question")
+        if not isinstance(question, str) or not question.strip():
+            raise AppError(ErrorCode.INVALID_REQUEST, "question is required")
+
+        table_keys = data.get("table_keys")
+        if not isinstance(table_keys, list) or not table_keys:
+            raise AppError(ErrorCode.INVALID_REQUEST, "table_keys must contain 1 to 10 items")
+        if len(table_keys) > 10:
+            raise AppError(ErrorCode.INVALID_REQUEST, "too many table_keys (max 10)")
+        if not all(isinstance(tk, str) and tk.strip() for tk in table_keys):
+            raise AppError(ErrorCode.INVALID_REQUEST, "table_keys entries must be non-empty strings")
+
+        raw_table_name = data.get("table_name")
+        if not isinstance(raw_table_name, str) or not raw_table_name.strip():
+            raise AppError(ErrorCode.INVALID_REQUEST, "table_name is required")
+
+        model_config = data.get("model")
+        if not isinstance(model_config, dict) or not model_config:
+            raise AppError(ErrorCode.INVALID_REQUEST, "model is required")
+
+        if not hasattr(loader, "fetch_sql_as_arrow") or not hasattr(loader, "get_column_types"):
+            raise AppError(
+                ErrorCode.INVALID_REQUEST,
+                "Current connector does not support NL2SQL pass-through",
+            )
+
+        import_options = data.get("import_options") or {}
+
+        # 局部 import 与 import-sql 风格对齐 + 避免顶层加载 LLM 栈
+        from data_formulator.auth.identity import get_identity_id
+        from data_formulator.workspace_factory import get_workspace
+        from data_formulator.routes.agents import get_client
+        from data_formulator.agents.nl2sql import run_nl2sql
+
+        workspace = get_workspace(get_identity_id())
+        client = get_client(model_config)
+
+        result = run_nl2sql(
+            client=client,
+            loader=loader,
+            workspace=workspace,
+            question=question.strip(),
+            table_keys=table_keys,
+            table_name=raw_table_name.strip(),
+            import_options=import_options,
+        )
+        return json_ok(result)
+    except AppError:
+        raise
+    except ValueError as e:
+        # run_nl2sql 内部入参校验 / LLM JSON / SELECT 浅校验失败 都走 INVALID_REQUEST
+        raise AppError(ErrorCode.INVALID_REQUEST, str(e))
+    except Exception as e:
+        classify_and_raise_connector_error(e, operation="import")
+
+
 @connectors_bp.route("/api/connectors/refresh-data", methods=["POST"])
 def connector_refresh_data():
     data = request.get_json() or {}
