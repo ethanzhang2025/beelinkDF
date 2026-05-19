@@ -435,6 +435,34 @@ class BeelinkDataLoader(ExternalDataLoader):
         sql = self._build_select_sql(segments, import_options or {})
         return self._exec_sql_to_arrow(sql, max_rows=_clamp_size(import_options))
 
+    # ── POC-1.5：用户手写 SQL 直通 ───────────────────────────
+    #
+    # 与 fetch_data_as_arrow 的差异：
+    # * 不再按 source_table + import_options 拼 SELECT；SQL 由调用方一字不改提供。
+    # * 权限 / 字段越权 / 语法错误全由 beelink 服务端裁决，DF 不做 SQL 解析。
+    # * 仍受 import_options.size 限制（默认 10000，硬上限 MAX_IMPORT_ROWS）；
+    #   beelink 单页 500 行硬上限仍由 _fetch_results_paginated 自动分页处理。
+
+    def fetch_sql_as_arrow(
+        self,
+        sql: str,
+        import_options: dict[str, Any] | None = None,
+    ) -> pa.Table:
+        """直接把 ``sql`` 提交给 beelink，结果以 pa.Table 返回。
+
+        Raises
+        ------
+        ValueError
+            ``sql`` 为空。
+        BeelinkAPIError
+            job 失败 / 超时 / 取结果失败 / 空结果且无可用 schema 等
+            （由底层 ``_exec_sql_to_arrow`` 抛出，原始错误信息透传，
+            不吞 beelink 的权限或字段越权报错）。
+        """
+        if not sql or not sql.strip():
+            raise ValueError("sql is required")
+        return self._exec_sql_to_arrow(sql.strip(), max_rows=_clamp_size(import_options))
+
     # ── 健康检查 ──────────────────────────────────────────────
 
     def test_connection(self) -> bool:

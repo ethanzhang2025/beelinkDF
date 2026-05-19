@@ -1454,6 +1454,55 @@ POC-1、POC-1.5、POC-2 均**不需要改 beelink**。以下是**可选**优化�
 - ❌ 前端 UI 任何改动
 - ❌ beelink Java 任何改动
 
+### 14.7 POC-1.5 实现与真机验收记录（2026-05-19）
+
+> 本节记录 POC-1.5 手写 SQL 直通的最小后端实现及真机验收事实。
+> 仍**不**包含 POC-2 / NL2SQL / DataAgent 改动；前端、beelink Java 零改动。
+
+**定位（重要边界）**
+
+* POC-1.5 = **用户手写 SQL** 直通；**不是** LLM 生成 SQL。
+* SQL 一字不改交给 beelink 执行；权限 / 字段越权 / 语法错误**全部由 beelink 服务端裁决**。
+* DF 只负责：接收 SQL → 转发到 beelink → 接收结果（Arrow）→ 落 workspace parquet → 注册成可拖图的表。
+* 不引入：SQL Guard、SQL 修复 Agent、强 BO/强 RAG、MCP-first。
+
+**最小后端实现**
+
+1. `BeelinkDataLoader.fetch_sql_as_arrow(sql, import_options) -> pa.Table`
+   * 不走 `_build_select_sql`，直接调既有的 `_exec_sql_to_arrow(sql, max_rows=_clamp_size(opts))`；
+   * 复用 POC-1 已经稳定的提交 → 轮询 → 分页（500 行硬上限） → Arrow 链路；
+   * 空 SQL 抛 `ValueError`；其它失败抛 `BeelinkAPIError`（含 beelink 原始 errorMessage）。
+
+2. `POST /api/connectors/import-sql`（挂在 `data_connector.py` 的 `connectors_bp`，与 `import-data` 同模式）
+   * **Body**：`{connector_id, sql, table_name, import_options?}`
+   * **行为**：`_resolve_connector → _require_loader → fetch_sql_as_arrow → workspace.write_parquet_from_arrow(source_info={source_query: sql, ...}) → 返回 {table_name, row_count, columns, source_query, refreshable=False}`
+   * `TableMetadata.source_query` 记录原始 SQL（DF 框架已预留该字段）；`source_table` 留空；
+   * `loader_params` 经 `get_safe_params()` 自动剔除密码后才落 metadata；
+   * 错误分支：缺 `connector_id / sql / table_name` 一律 `INVALID_REQUEST`；beelink 端错误经 `classify_and_raise_connector_error(operation="import")` 落到 `DATA_LOAD_ERROR / ACCESS_DENIED / CONNECTOR_AUTH_FAILED` 等；
+   * 不支持基于 `source_query` 的 refresh（返回 `refreshable=False`）；如需重跑由前端再次提交 SQL。
+
+3. **未触碰**：`fetch_data_as_arrow` / `import-data` / DataAgent / 前端 / beelink Java；POC-1 表导入行为完全不变。
+
+**真机验收（全部 PASS · `feat/beelink-poc1.5-sql-pass-through`）**
+
+| # | 操作 | 结果 |
+|---|------|------|
+| 1 | `POST /api/connectors/import-sql {}` | `INVALID_REQUEST: connector_id is required` |
+| 2 | 缺 `sql` | `INVALID_REQUEST: sql is required` |
+| 3 | 缺 `table_name` | `INVALID_REQUEST: table_name is required` |
+| 4 | 用 connector `beelink:beelink-main` + `SELECT * FROM smartquery_demo.customers LIMIT 10` + `table_name=customers_sql_poc15` | `success`，10 行真落 parquet，6 列（id/name/gender/region_id/registered_at/age_group），中文 UTF-8 完整 |
+| 5 | `GET /api/tables/list-tables`（`X-Workspace-Id: default`） | 同时看到 POC-1 的 `customers`（1000 行）与本表 `customers_sql_poc15`（10 行） |
+| 6 | 查 `customers_sql_poc15` metadata | `data_loader_type=BeelinkDataLoader`、`source_table_name=null`、`source_query="SELECT * FROM smartquery_demo.customers LIMIT 10"`、`data_loader_params` 仅含 `base_url/user/verify_ssl`（**密码已剔除**）、`import_options={"size":10}` |
+| 7 | 错误 SQL `SELECT bogus FROM smartquery_demo.no_such_table` | `DATA_LOAD_ERROR: Failed to load data from the data source`（不吞 beelink 原报错） |
+
+**当前边界（明确不包含）**
+
+* ❌ POC-2 / NL → Dremio SQL（DataAgent 工具扩展）
+* ❌ DataAgent 任何改动
+* ❌ 前端 UI 任何改动
+* ❌ beelink Java 任何改动
+* ❌ SQL Guard / SQL 修复 Agent / 强 BO / 强 RAG / MCP-first
+
 **已知注意事项（踩坑实录）**
 
 1. **登录端点真实路径**：`/apiv2/login` 不是 `/login`。Dremio v25 的 V2 API 由 `RestServerV2.java:40` 用 `@RestApiServer(pathSpec="/apiv2/*")` 挂载；`LogInLogOutResource.java` 的 `@Path("/login")` 是相对路径。设计文档原先据 `@Path` 直接推断的 URL 是错的，本次已修正脚本与 BeelinkDataLoader。

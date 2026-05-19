@@ -1602,6 +1602,83 @@ def connector_import_data():
         classify_and_raise_connector_error(e, operation="import")
 
 
+@connectors_bp.route("/api/connectors/import-sql", methods=["POST"])
+def connector_import_sql():
+    """POC-1.5：用户手写 SQL 直通导入。
+
+    与 ``import-data`` 的差异：
+    * 入参用 ``sql`` 而非 ``source_table``；SQL 由调用方手写（**非 LLM 生成**）。
+    * SQL 一字不改交给底层 loader → 由数据源（beelink）裁权与执行。
+    * ``TableMetadata.source_query`` 记录原始 SQL；``source_table`` 留空。
+    * 不支持基于 SQL 的 refresh（``refreshable=False``）；如需重跑由前端再次提交。
+
+    Body
+    ----
+    ``{connector_id, sql, table_name, import_options?}``
+
+    需要 loader 实现 ``fetch_sql_as_arrow(sql, import_options)``；当前仅
+    BeelinkDataLoader 支持，其他 loader 调用会得到 INVALID_REQUEST 提示。
+    """
+    data = request.get_json() or {}
+    source = _resolve_connector(data)
+
+    try:
+        loader = source._require_loader()
+
+        sql = data.get("sql")
+        if not isinstance(sql, str) or not sql.strip():
+            raise AppError(ErrorCode.INVALID_REQUEST, "sql is required")
+        sql = sql.strip()
+
+        raw_table_name = data.get("table_name")
+        if not isinstance(raw_table_name, str) or not raw_table_name.strip():
+            raise AppError(ErrorCode.INVALID_REQUEST, "table_name is required")
+
+        if not hasattr(loader, "fetch_sql_as_arrow"):
+            raise AppError(
+                ErrorCode.INVALID_REQUEST,
+                "Current connector does not support raw SQL pass-through",
+            )
+
+        import_options = data.get("import_options") or {}
+
+        from data_formulator.auth.identity import get_identity_id
+        from data_formulator.workspace_factory import get_workspace
+        from data_formulator.datalake.parquet_utils import sanitize_table_name
+
+        workspace = get_workspace(get_identity_id())
+        safe_name = sanitize_table_name(raw_table_name.strip())
+
+        arrow_table = loader.fetch_sql_as_arrow(sql, import_options=import_options)
+
+        # source_query 落 TableMetadata，便于追溯；source_table 留空表示这是 SQL 直通而非表导入
+        source_info = {
+            "loader_type": loader.__class__.__name__,
+            "loader_params": loader.get_safe_params(),
+            "source_query": sql,
+            "import_options": import_options,
+        }
+        meta = workspace.write_parquet_from_arrow(
+            table=arrow_table,
+            table_name=safe_name,
+            source_info=source_info,
+        )
+        return json_ok({
+            "table_name": meta.name,
+            "row_count": meta.row_count,
+            "columns": [
+                {"name": c.name, "dtype": c.dtype}
+                for c in (meta.columns or [])
+            ],
+            "source_query": sql,
+            "refreshable": False,
+        })
+    except AppError:
+        raise
+    except Exception as e:
+        classify_and_raise_connector_error(e, operation="import")
+
+
 @connectors_bp.route("/api/connectors/refresh-data", methods=["POST"])
 def connector_refresh_data():
     data = request.get_json() or {}
