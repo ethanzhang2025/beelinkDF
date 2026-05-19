@@ -28,7 +28,7 @@ from typing import Any
 
 from flask import Blueprint, Flask, request
 
-from data_formulator.error_handler import json_ok
+from data_formulator.error_handler import json_ok, classify_and_wrap_llm_error
 from data_formulator.errors import AppError, ErrorCode
 
 from data_formulator.data_loader.external_data_loader import (
@@ -1736,7 +1736,7 @@ def connector_nl2sql_import():
         from data_formulator.auth.identity import get_identity_id
         from data_formulator.workspace_factory import get_workspace
         from data_formulator.routes.agents import get_client
-        from data_formulator.agents.nl2sql import run_nl2sql
+        from data_formulator.agents.nl2sql import run_nl2sql, NL2SQLLLMError
 
         workspace = get_workspace(get_identity_id())
         client = get_client(model_config)
@@ -1754,8 +1754,12 @@ def connector_nl2sql_import():
     except AppError:
         raise
     except ValueError as e:
-        # run_nl2sql 内部入参校验 / LLM JSON / SELECT 浅校验失败 都走 INVALID_REQUEST
+        # caller 错（入参非法 / schema 取不到 / SQL 浅校验失败）→ INVALID_REQUEST
         raise AppError(ErrorCode.INVALID_REQUEST, str(e))
+    except NL2SQLLLMError as e:
+        # LLM 端错（auth / rate-limit / timeout / 反复非 JSON 等）→ LLM 系列错误码，
+        # 与 beelink 端错（DATA_LOAD_ERROR 等）严格区分
+        raise classify_and_wrap_llm_error(e.__cause__ or e) from e
     except Exception as e:
         classify_and_raise_connector_error(e, operation="import")
 

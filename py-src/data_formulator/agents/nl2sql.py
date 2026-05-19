@@ -32,6 +32,23 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# 自定义异常 —— 让端点层区分"LLM 端错"与"caller 错 / beelink 端错"
+# ---------------------------------------------------------------------------
+
+class NL2SQLLLMError(RuntimeError):
+    """LLM 调用 / 输出失败的统一异常。
+
+    端点层捕获后用 ``error_handler.classify_and_wrap_llm_error`` 分到
+    ``LLM_AUTH_FAILED / LLM_RATE_LIMIT / LLM_TIMEOUT / LLM_UNKNOWN_ERROR`` 等
+    LLM 系列错误码——而不是错误地落到 connector classifier 的
+    ``CONNECTOR_AUTH_FAILED / DB_CONNECTION_FAILED`` 上让用户排错走错方向。
+
+    构造时务必用 ``raise NL2SQLLLMError(...) from exc`` 保留 ``__cause__``，
+    让 classifier 能拿到原始异常的文本做关键词匹配。
+    """
+
+
+# ---------------------------------------------------------------------------
 # 常量
 # ---------------------------------------------------------------------------
 
@@ -199,26 +216,31 @@ def _call_llm_for_sql(client, messages: list[dict[str, Any]]) -> str:
     与 ``data_agent._call_llm_once`` 同款双后端分支（openai / litellm），但
     **不传 tools** —— POC-2A 不需要 DataAgent 的工具集污染上下文。
     """
-    if client.endpoint == "openai":
-        oai = openai.OpenAI(
-            base_url=client.params.get("api_base") or None,
-            api_key=client.params.get("api_key") or "",
-            timeout=_LLM_TIMEOUT_SECONDS,
-        )
-        resp = oai.chat.completions.create(
+    try:
+        if client.endpoint == "openai":
+            oai = openai.OpenAI(
+                base_url=client.params.get("api_base") or None,
+                api_key=client.params.get("api_key") or "",
+                timeout=_LLM_TIMEOUT_SECONDS,
+            )
+            resp = oai.chat.completions.create(
+                model=client.model,
+                messages=messages,
+            )
+            return resp.choices[0].message.content or ""
+
+        params = client.params.copy()
+        resp = litellm.completion(
             model=client.model,
             messages=messages,
+            drop_params=True,
+            **params,
         )
         return resp.choices[0].message.content or ""
-
-    params = client.params.copy()
-    resp = litellm.completion(
-        model=client.model,
-        messages=messages,
-        drop_params=True,
-        **params,
-    )
-    return resp.choices[0].message.content or ""
+    except Exception as exc:
+        # 让端点层落到 LLM 系列错误码而非 connector 错误码；__cause__ 保留
+        # 原始 openai/litellm 异常文本供 classify_and_wrap_llm_error 关键词匹配
+        raise NL2SQLLLMError(f"LLM call failed: {type(exc).__name__}") from exc
 
 
 # ---------------------------------------------------------------------------
@@ -285,7 +307,14 @@ def run_nl2sql(
         messages.append({"role": "assistant", "content": raw})
         messages.append({"role": "system", "content": _JSON_RETRY_INSTRUCTION})
         raw = _call_llm_for_sql(client, messages)
-        parsed = _parse_json_response(raw)  # 仍失败 → 向外抛
+        try:
+            parsed = _parse_json_response(raw)
+        except ValueError as exc:
+            # retry 后仍非 JSON：归为 LLM 端错（不是 caller 错），让端点层
+            # 走 LLM_UNKNOWN_ERROR 而非 INVALID_REQUEST
+            raise NL2SQLLLMError(
+                f"LLM output is not valid JSON after retry: {exc}"
+            ) from exc
 
     rationale = parsed.get("rationale") or ""
     sql_value = parsed.get("sql")
