@@ -1429,7 +1429,7 @@ POC-1、POC-1.5、POC-2 均**不需要改 beelink**。以下是**可选**优化�
 **验收链路（全部 PASS）**
 
 1. **Phase 0 REST 6 步**：`POST /apiv2/login` → `GET /api/v3/catalog` → `GET /api/v3/catalog/{id}?maxChildren=20` → `POST /api/v3/sql` → `GET /api/v3/job/{id}` 轮询 → `GET /api/v3/job/{id}/results?limit=500`，全通过；jobState=COMPLETED，rowCount=1。
-2. **`GET /api/data-loaders`**：返回 11 个 loaders 含 `beelink`；hierarchy=`[source,table]`；auth_mode=`connection`；params_form=`[base_url, user, password, verify_ssl, table_filter]`。
+2. **`GET /api/data-loaders`**：返回 11 个 loaders 含 `beelink`；hierarchy=`[source,table]`；auth_mode=`connection`；params_form 是 4 个连接参数（`base_url / user / password / verify_ssl`），`table_filter` 是浏览/查询时的入参（`list_tables` / `get-catalog-tree`），不属于连接表单。
 3. **`POST /api/connectors`**：`{loader_type:"beelink", source_id:"beelink_main", params:{...}}` → 返回 `{id:"beelink:beelink-main", connected:true}`（注意 source_id `beelink_main` 被规范化为 `beelink-main`）。
 4. **`POST /api/connectors/get-catalog-tree`**：`{connector_id:"beelink:beelink-main"}` → 3 个 namespace（test / smartquery_demo / tpcds_sf10），合计 8+ 张 DATASET。
 5. **`POST /api/connectors/preview-data`**：smartquery_demo.customers 前 5 行，6 列；首行 `{"id":1,"name":"客户_00001","gender":"女",...}` 中文 UTF-8 完整。

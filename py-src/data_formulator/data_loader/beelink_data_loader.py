@@ -59,6 +59,40 @@ _BEELINK_AUTH_PREFIX = "_beelink"
 # Dremio Arrow 时间/日期类型名，用于 is_dttm 推断
 _TEMPORAL_ARROW_NAMES = {"timestamp", "date", "time", "datetime"}
 
+# Arrow Field describer 的常见 type name → Dremio SQL 类型名映射。
+# 命中后给前端一个熟悉的 SQL 类型字面量；未命中则保留原值由上层兜底。
+_ARROW_TO_SQL_TYPE: dict[str, str] = {
+    "utf8": "VARCHAR",
+    "largeutf8": "VARCHAR",
+    "varchar": "VARCHAR",
+    "string": "VARCHAR",
+    "int": "INTEGER",
+    "int8": "INTEGER",
+    "int16": "INTEGER",
+    "int32": "INTEGER",
+    "int64": "BIGINT",
+    "integer": "INTEGER",
+    "bigint": "BIGINT",
+    "floatingpoint": "DOUBLE",
+    "float": "DOUBLE",
+    "float32": "DOUBLE",
+    "float64": "DOUBLE",
+    "double": "DOUBLE",
+    "bool": "BOOLEAN",
+    "boolean": "BOOLEAN",
+    "decimal": "DECIMAL",
+    "decimal128": "DECIMAL",
+    "decimal256": "DECIMAL",
+    "date": "DATE",
+    "date32": "DATE",
+    "date64": "DATE",
+    "time": "TIME",
+    "time32": "TIME",
+    "time64": "TIME",
+    "timestamp": "TIMESTAMP",
+    "datetime": "TIMESTAMP",
+}
+
 
 # ---------------------------------------------------------------------------
 # 自定义异常 —— 用 RuntimeError 子类即可，让 DataConnector 错误分类器统一兜底
@@ -155,8 +189,10 @@ class BeelinkDataLoader(ExternalDataLoader):
     def catalog_hierarchy() -> list[dict[str, str]]:
         # beelink 路径深度不固定（mysql_prod.sales.orders 三段；
         # iceberg_lake.warehouse.fact_x 也可能三/四段）。
-        # POC 阶段统一暴露两层（source + table），由 list_tables 把多层 path
-        # 通过显式 ``path`` 传回，DataConnector 自己会按 path 渲染嵌套树。
+        # POC 阶段统一暴露两层（source + table）：list_tables 只回 name=".".join(path)，
+        # 不带显式 ``path`` 字段——框架的 _tables_to_catalog_tree 会用
+        # ``name.split(".", maxsplit=num_ns)`` 切，把 source 段保住、把内层多段
+        # 整体下沉为 leaf 名，避免显式 path 被框架按 eff_depth 截断时丢掉 source。
         return [
             {"key": "source", "label": "Source"},
             {"key": "table", "label": "Table"},
@@ -293,8 +329,11 @@ class BeelinkDataLoader(ExternalDataLoader):
                     if keyword and keyword not in name.lower():
                         continue
                     tables.append({
+                        # 故意不带 ``path`` 字段：catalog_hierarchy 深度 = 2，
+                        # 框架对 len(path) > eff_depth 会截掉头部段，导致 source 丢失。
+                        # 不传 path 时框架走 name.split(".", maxsplit=num_ns)，
+                        # source 永远保住，内层多段整体下沉为 leaf 名。
                         "name": name,
-                        "path": cpath,
                         "metadata": {
                             # 行数 / 列信息留给 get_column_types() 在用户点开时补；
                             # 这里只给最便宜的占位，避免对每张表都打一次 schema 请求。
@@ -371,9 +410,12 @@ class BeelinkDataLoader(ExternalDataLoader):
             if not isinstance(field, dict):
                 continue
             arrow_type = _extract_arrow_type_name(field.get("type"))
+            # 命中映射时前端拿到 VARCHAR/INTEGER/TIMESTAMP 等熟悉字面量；
+            # 未命中时保留原始 Arrow 名（如 Utf8/Int32），不误伤未知类型。
+            sql_type = _map_arrow_to_sql_type(arrow_type)
             columns.append({
                 "name": field.get("name") or "",
-                "type": arrow_type or "VARCHAR",
+                "type": sql_type or arrow_type or "VARCHAR",
                 "is_dttm": bool(arrow_type) and arrow_type.lower() in _TEMPORAL_ARROW_NAMES,
                 "description": None,
             })
@@ -461,12 +503,16 @@ class BeelinkDataLoader(ExternalDataLoader):
         """按 beelink 单页硬上限 500 行分页累积，最多取 max_rows 行。"""
         rows_all: list[dict[str, Any]] = []
         offset = 0
+        schema_info: Any = None
         encoded_id = urllib.parse.quote(job_id, safe="")
         while len(rows_all) < max_rows:
             limit = min(_BEELINK_PAGE_SIZE, max_rows - len(rows_all))
             payload = self._request(
                 "GET", f"/api/v3/job/{encoded_id}/results?offset={offset}&limit={limit}",
             )
+            # 首页就抓 schema：空结果时也能据此构造列骨架
+            if schema_info is None and isinstance(payload, dict):
+                schema_info = payload.get("schema")
             rows = (payload or {}).get("rows") or []
             if not rows:
                 break
@@ -475,6 +521,11 @@ class BeelinkDataLoader(ExternalDataLoader):
             if len(rows) < limit:
                 # beelink 返回少于请求量，说明已是最后一页
                 break
+
+        if not rows_all:
+            # 空结果：从 results payload 的 schema 还原一个零行但有列的 pa.Table，
+            # 否则下游 write_parquet_from_arrow 会拿到零列零行的表，无法落 parquet。
+            return _empty_table_from_schema(schema_info)
 
         # TODO: schema 字段是 Arrow Field describer 数组，理论上能直接构建 pa.Schema
         # 让导入后的 dtype 更精确（避免 int/decimal 被推断成 float64）。POC-1 阶段
@@ -525,6 +576,13 @@ def _brief_body(resp: "requests.Response") -> str:
     return json.dumps(data, ensure_ascii=False)[:500]
 
 
+def _map_arrow_to_sql_type(arrow_type: str | None) -> str | None:
+    """把常见 Arrow 类型名映射为 Dremio SQL 类型名；未命中返回 None。"""
+    if not arrow_type:
+        return None
+    return _ARROW_TO_SQL_TYPE.get(arrow_type.lower())
+
+
 def _extract_arrow_type_name(t: Any) -> str:
     """从 Arrow Field describer 的 type 字段里抠出可读类型名。
 
@@ -545,6 +603,38 @@ def _extract_arrow_type_name(t: Any) -> str:
             if isinstance(v, str) and v:
                 return v
     return ""
+
+
+def _empty_table_from_schema(schema_info: Any) -> pa.Table:
+    """空结果集兜底：从 ``/results`` payload 的 schema 拼一个零行但有列的 pa.Table。
+
+    POC-1 阶段不解析 Arrow Field 嵌套类型，所有列统一用 ``pa.string()``——
+    反正零行，类型不影响数据，仅保证 parquet 有列骨架可写。schema 不可用时
+    直接抛 BeelinkAPIError，让用户知道查询无结果且无 schema 可用。
+    """
+    # schema_info 可能是 {"fields": [...]} 或直接 [...] 两种形态
+    if isinstance(schema_info, dict):
+        fields = schema_info.get("fields")
+    elif isinstance(schema_info, list):
+        fields = schema_info
+    else:
+        fields = None
+
+    if isinstance(fields, list):
+        col_names: list[str] = [
+            f["name"] for f in fields
+            if isinstance(f, dict) and f.get("name")
+        ]
+    else:
+        col_names = []
+
+    if not col_names:
+        raise BeelinkAPIError(
+            "beelink 查询无结果，且响应中没有可用 schema，无法构造空结果表",
+        )
+
+    empty_str_col = pa.array([], type=pa.string())
+    return pa.table({name: empty_str_col for name in col_names})
 
 
 def _safe_table_from_rows(rows: list[dict[str, Any]]) -> pa.Table:
