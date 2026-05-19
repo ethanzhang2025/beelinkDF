@@ -288,6 +288,9 @@ def execute_sql_to_workspace(
     if extra_import_options:
         merged_options.update(extra_import_options)
 
+    # 故意只把"原始" import_options 传给 loader 执行段（决定 size/timeout 等执行参数），
+    # extra_import_options（如 nl2sql_question / 调用方上下文）只落 TableMetadata 供后续追溯，
+    # 不进 fetch_sql_as_arrow 的执行路径——避免与 loader 的 _clamp_size / _clamp_timeout 冲突。
     arrow_table = loader.fetch_sql_as_arrow(sql, import_options=import_options or {})
 
     safe_name = workspace.get_fresh_name(table_name.strip())
