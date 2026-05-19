@@ -1475,10 +1475,13 @@ POC-1、POC-1.5、POC-2 均**不需要改 beelink**。以下是**可选**优化�
 
 2. `POST /api/connectors/import-sql`（挂在 `data_connector.py` 的 `connectors_bp`，与 `import-data` 同模式）
    * **Body**：`{connector_id, sql, table_name, import_options?}`
+   * `import_options`（全部可选）：
+     - `size`：取行数上限，默认 10000，封顶 `MAX_IMPORT_ROWS=2_000_000`，非法值回落默认；
+     - `timeout`：等 job COMPLETED 的秒数，默认 60s，封顶 600s（10 分钟），非法/越界回落默认；
    * **行为**：`_resolve_connector → _require_loader → fetch_sql_as_arrow → workspace.write_parquet_from_arrow(source_info={source_query: sql, ...}) → 返回 {table_name, row_count, columns, source_query, refreshable=False}`
    * `TableMetadata.source_query` 记录原始 SQL（DF 框架已预留该字段）；`source_table` 留空；
    * `loader_params` 经 `get_safe_params()` 自动剔除密码后才落 metadata；
-   * 错误分支：缺 `connector_id / sql / table_name` 一律 `INVALID_REQUEST`；beelink 端错误经 `classify_and_raise_connector_error(operation="import")` 落到 `DATA_LOAD_ERROR / ACCESS_DENIED / CONNECTOR_AUTH_FAILED` 等；
+   * 错误分支：缺 `connector_id / sql / table_name` 一律 `INVALID_REQUEST`；workspace 未建（缺 `X-Workspace-Id` 头）由 DF 框架抛 `INVALID_REQUEST: No active workspace`；beelink 端错误经 `classify_and_raise_connector_error(operation="import")` 落到 `DATA_LOAD_ERROR / ACCESS_DENIED / CONNECTOR_AUTH_FAILED`；job 超时报 `DB_CONNECTION_FAILED(retry=True)`（message 含英文 "timeout" 关键词）；
    * 不支持基于 `source_query` 的 refresh（返回 `refreshable=False`）；如需重跑由前端再次提交 SQL。
 
 3. **未触碰**：`fetch_data_as_arrow` / `import-data` / DataAgent / 前端 / beelink Java；POC-1 表导入行为完全不变。

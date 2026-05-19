@@ -52,6 +52,9 @@ _BEELINK_PAGE_SIZE = 500
 _DEFAULT_HTTP_TIMEOUT = 30.0
 # 轮询 jobState 的最长等待时间（秒），POC 阶段保守取 60s
 _DEFAULT_JOB_WAIT = 60.0
+# POC-1.5：用户可通过 import_options.timeout 覆盖 _wait_for_job 默认值，
+# 但封顶 10 分钟——避免误传过大值卡死 worker 与 HTTP 连接
+_MAX_JOB_WAIT = 600.0
 # 走 list_tables 时控制对 beelink catalog 的递归预算，防止误用打满 beelink
 _LIST_TABLES_MAX_NODES = 5000
 # beelink token 自定义头前缀（TokenUtils.java:27）
@@ -450,6 +453,11 @@ class BeelinkDataLoader(ExternalDataLoader):
     ) -> pa.Table:
         """直接把 ``sql`` 提交给 beelink，结果以 pa.Table 返回。
 
+        ``import_options``:
+            * ``size``：取行数上限（默认 10000，硬封顶 ``MAX_IMPORT_ROWS``）。
+            * ``timeout``：等 job COMPLETED 的秒数（默认 ``_DEFAULT_JOB_WAIT``，
+              封顶 ``_MAX_JOB_WAIT``）。非法值 / 越界值都回落默认。
+
         Raises
         ------
         ValueError
@@ -461,7 +469,11 @@ class BeelinkDataLoader(ExternalDataLoader):
         """
         if not sql or not sql.strip():
             raise ValueError("sql is required")
-        return self._exec_sql_to_arrow(sql.strip(), max_rows=_clamp_size(import_options))
+        return self._exec_sql_to_arrow(
+            sql.strip(),
+            max_rows=_clamp_size(import_options),
+            max_wait=_clamp_timeout(import_options),
+        )
 
     # ── 健康检查 ──────────────────────────────────────────────
 
@@ -499,14 +511,27 @@ class BeelinkDataLoader(ExternalDataLoader):
         limit_sql = f" LIMIT {_clamp_size(opts)}"
         return f"SELECT {cols_sql} FROM {from_clause}{order_sql}{limit_sql}"
 
-    def _exec_sql_to_arrow(self, sql: str, *, max_rows: int) -> pa.Table:
-        """提交 SQL → 轮询 → 分页拉结果 → 转 pa.Table。"""
+    def _exec_sql_to_arrow(
+        self,
+        sql: str,
+        *,
+        max_rows: int,
+        max_wait: float | None = None,
+    ) -> pa.Table:
+        """提交 SQL → 轮询 → 分页拉结果 → 转 pa.Table。
+
+        ``max_wait=None`` 时走 ``_wait_for_job`` 的默认值，POC-1 表导入路径
+        ``fetch_data_as_arrow`` 不传该参数 → 行为完全不变。
+        """
         submit = self._request("POST", "/api/v3/sql", json_body={"sql": sql})
         if not isinstance(submit, dict) or "id" not in submit:
             raise BeelinkAPIError(f"beelink /api/v3/sql 返回结构异常：{submit!r}")
         job_id = submit["id"]
         logger.debug("beelink job 提交成功 id=%s sql=%s", job_id, sql)
-        self._wait_for_job(job_id)
+        if max_wait is None:
+            self._wait_for_job(job_id)
+        else:
+            self._wait_for_job(job_id, max_wait=max_wait)
         return self._fetch_results_paginated(job_id, max_rows=max_rows)
 
     def _wait_for_job(self, job_id: str, *, max_wait: float = _DEFAULT_JOB_WAIT) -> None:
@@ -521,8 +546,11 @@ class BeelinkDataLoader(ExternalDataLoader):
                 msg = (payload or {}).get("errorMessage") or f"job {state}"
                 raise BeelinkAPIError(f"beelink job {state}: {msg}", body=payload)
             if time.time() > deadline:
+                # message 同时含英文 "timeout" 关键词，让 connector_errors classifier
+                # 落到 DB_CONNECTION_FAILED(retry=True) 而非 fallback DATA_LOAD_ERROR
                 raise BeelinkAPIError(
-                    f"beelink job {job_id} 等待超时 ({max_wait}s, last state={state})",
+                    f"beelink job {job_id} 等待超时（timeout after {max_wait}s, "
+                    f"last state={state}）",
                 )
             time.sleep(delay)
             delay = min(delay * 1.4, 2.0)
@@ -581,6 +609,22 @@ def _clamp_size(opts: dict[str, Any] | None) -> int:
     if n <= 0:
         return default_size
     return min(n, MAX_IMPORT_ROWS)
+
+
+def _clamp_timeout(opts: dict[str, Any] | None) -> float:
+    """POC-1.5：把 import_options.timeout 限制在 (0, _MAX_JOB_WAIT]。
+
+    非法 / 缺失 / 越界一律回落 ``_DEFAULT_JOB_WAIT``，避免单条慢 SQL 误传
+    超大 timeout 拖死 worker。"""
+    if not opts or opts.get("timeout") is None:
+        return _DEFAULT_JOB_WAIT
+    try:
+        n = float(opts["timeout"])
+    except (TypeError, ValueError):
+        return _DEFAULT_JOB_WAIT
+    if n <= 0:
+        return _DEFAULT_JOB_WAIT
+    return min(n, _MAX_JOB_WAIT)
 
 
 def _safe_json(resp: "requests.Response") -> Any:
