@@ -421,3 +421,5 @@ NUL
 
 # Package manager lock files (using yarn)
 package-lock.json
+# Playwright MCP local cache (UI 验证用，不入仓)
+.playwright-mcp/
