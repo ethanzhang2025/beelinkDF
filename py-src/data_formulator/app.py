@@ -181,6 +181,10 @@ def _register_blueprints():
     app.register_blueprint(session_bp)
     app.register_blueprint(demo_stream_bp)
 
+    # 最小 ChatBI 演示入口：GET /chatbi 返回独立 HTML（不进入 React 体系，零 vite build）
+    from data_formulator.chatbi_demo import chatbi_bp
+    app.register_blueprint(chatbi_bp)
+
     # Initialise pluggable authentication (reads AUTH_PROVIDER env var)
     from data_formulator.auth.identity import init_auth, get_active_provider
     init_auth(app)
