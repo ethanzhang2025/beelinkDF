@@ -1604,6 +1604,64 @@ POC-1、POC-1.5、POC-2 均**不需要改 beelink**。以下是**可选**优化�
 6. **DF Bash background process 容易被 parent shell 一起 kill**（exit 144）。本机调试启 Flask 用 `setsid + < /dev/null + disown` 才能完全脱离。
 7. **首屏 Select Models 强引导**：未配 LLM 时 DF 默认 landing 拦截 DataThread；不影响 connector 功能本身，只是体验上需要先去 Settings 选个 model 才能进 Data Thread 做图。
 
+### 14.9 POC-2B DataAgent tool 接入实现与验收记录（2026-05-19）
+
+> 本节记录 POC-2B 的实现事实与本机真机验收证据。**不**包含 POC-2C；前端 / beelink Java 零改动；POC-1 / POC-1.5 / POC-2A 三个端点行为完全锁定。
+
+**定位（重要边界）**
+
+* POC-2B = **DataAgent tool 接入**：在 DataAgent 的 8 个工具基础上**追加**第 9 个工具 `query_beelink_sql`，让 LLM 在自循环里**自己**生成 Dremio SQL 作为 tool_args 传给后端执行——**不再**调用 POC-2A 的 `run_nl2sql` LLM 生成链路。
+* schema context 由 DataAgent 既有的 `search_data_tables` + `read_catalog_metadata`（context.py）天然提供——**不新增** handler、**不依赖** POC-2A 的 schema 注入。
+* 执行+写入逻辑**复用** POC-2A 的 `execute_sql_to_workspace(loader, workspace, sql, table_name, ...)` helper（本轮从 `run_nl2sql` 抽出）；POC-2A `run_nl2sql` 内部改为复用同一 helper，行为契约不变（接口/返回字段/错误码 zero diff）。
+* 唯一可观察的副作用：helper 用 `workspace.get_fresh_name(table_name)` 取名，原本 POC-2A 中"重名覆盖"语义变为"自动加 `_2/_3` 后缀"——用户明文要求的鲁棒性增强，不算回归。
+
+**最小后端实现**
+
+1. `py-src/data_formulator/agents/nl2sql.py`（重构 +63 / -33 行）
+   * **新增** `execute_sql_to_workspace(*, loader, workspace, sql, table_name, import_options=None, extra_import_options=None) -> dict`：
+     - 浅校验 SELECT/WITH（`_is_select_or_with`）
+     - 调 POC-1.5 `loader.fetch_sql_as_arrow(sql, import_options)`
+     - `workspace.get_fresh_name(table_name)` → 避免覆盖
+     - `workspace.write_parquet_from_arrow(source_info={source_query: sql, ...})`
+     - `import_options` 与 `extra_import_options`（如 `nl2sql_question`）合并落 metadata
+   * `run_nl2sql` 步骤 4-6 改为单次 `execute_sql_to_workspace(...)` + 后挂 `rationale` 字段——POC-2A 端点返回字段完全不变。
+
+2. `py-src/data_formulator/agents/data_agent.py`（+~110 行，纯追加）
+   * `TOOLS` 末尾 append `query_beelink_sql` spec（参数：`purpose / connector_id / sql / table_name / max_rows`，前 4 个 required）
+   * `_tool_loop` 在 `read_knowledge` elif 之后、`visualize/clarify/...` 之前新增 `elif tool_name == "query_beelink_sql":` 分支，调 `self._handle_query_beelink_sql(tool_args)`，按 (tool_content, tool_status) yield `tool_result` 事件（与现有 tool_result 事件 schema 完全一致）。
+   * 新增实例方法 `_handle_query_beelink_sql(tool_args) -> (str, str)`：
+     - 用 `self._identity_id` + `data_connector._user_connector_key` 在 `DATA_CONNECTORS` 注册表中查找当前用户的 beelink connector（fallback 走全局 key）
+     - 调 `connector._require_loader()` → `execute_sql_to_workspace(...)`
+     - 成功返 `(json.dumps({"status":"ok", ...}), "ok")`
+     - 失败返 `(f"query_beelink_sql failed: {type(exc).__name__}: {str(exc)[:500]}", "error")` 保留 beelink 原始 errorMessage 关键片段，让 LLM 下一轮自修
+   * DataAgent `__init__` 加一行 `self._identity_id = identity_id` —— ctor 既有参数 `identity_id` 此前只用于初始化 ReasoningLogger，POC-2B 需要在 tool handler 内查 user-scoped connector
+   * `SYSTEM_PROMPT` 末尾**追加** `## When to use query_beelink_sql vs explore(python)` 段（~22 行）：说明何时用 SQL pushdown vs duckdb on parquet、SELECT/WITH 约束、多段双引号表名规范
+
+3. **未触碰**：`routes/agents.py` / `context.py` / `data_connector.py`（POC-2A 端点行为锁定）/ `beelink_data_loader.py` / 前端 `src/` / beelink Java。
+
+**真机验收（feat/beelink-poc2b-dataagent-tool；DeepSeek + 本机 beelink :8998 + DF :5500）**
+
+| # | 用例 | 结果 |
+|---|------|------|
+| 0 | LLM 选型 | `deepseek-v4-pro` / `deepseek-v4-flash` 是 thinking 模式（返回 `reasoning_content` 字段需在下轮 messages 回传），与 DataAgent `_call_llm_once` 自循环不兼容 → 报 `400 The reasoning_content in the thinking mode must be passed back to the API`。这是 DataAgent 既有架构与 reasoning 模型的限制，**不在 POC-2B 范围**。改用 **`deepseek-chat`**（V3 系列，非 thinking）验证；POC-2A 单次 LLM 调用不受影响（POC-2A 端点 LLM 错回归仍走 `LLM_AUTH_FAILED` 路径，已验证）。 |
+| 1 | 用例 1（自然提问 → SQL pushdown）：`user_question="用 beelink 数据源里 smartquery_demo.customers 这张表，按 gender 统计客户数"` | DataAgent 调用链：`search_data_tables ×3 → query_beelink_sql → explore ×5 → completion`；`query_beelink_sql` status=ok，SQL=`SELECT gender, COUNT(*) AS customer_count FROM "smartquery_demo"."customers" GROUP BY gender ORDER BY customer_count DESC`，新表 `customers_by_gender`(3 行) 写入 workspace；终态 `completion`。 |
+| 2 | 用例 2（诱导虚构字段 `wrong_col_xyz`）：观察 DataAgent 错误自修循环 | DataAgent 调用链：`search_data_tables ×3 → inspect_source_data → explore ×4 → think → query_beelink_sql → clarify`。LLM 用 inspect/explore **前置确认** schema，没尝试错列名 SQL（更稳健的路径，**优于设计预期的"先错再修"**）；query_beelink_sql 实际 status=ok。tool_result 错误反馈机制由单元自检 (`connector 不存在 → error`、`非 SELECT/WITH → error`) 双保险覆盖。 |
+| 3 | 用例 3（已导入表优先 explore）：在 `customers_by_gender` 已存在 workspace 时再问 "按 gender 统计客户数" | DataAgent 调用链：`inspect_source_data → completion`；**未调** `query_beelink_sql`。SYSTEM_PROMPT 决策提示生效。 |
+| 4 | POC-1 `import-data` 回归 | success；row_count=3；refreshable=true 不变 |
+| 5 | POC-1.5 `import-sql` 回归 | success；row_count=1；source_query 正确 |
+| 6 | POC-2A `nl2sql-import` 回归（DeepSeek Chat）| success；row_count=3；SQL=`SELECT * FROM "smartquery_demo"."customers" LIMIT 3`；source_query==sql；返回字段完整 |
+| 7 | POC-2A LLM 错误回归（伪 api_key）| `code=LLM_AUTH_FAILED, retry=false`（POC-2A 加固分流仍生效）|
+| 8 | 单元（无网络）：DataAgent ctor `self._identity_id` 持久化；`_handle_query_beelink_sql` 拒 `connector_id` 缺失；拒 connector 不存在；`execute_sql_to_workspace` 拒非 SELECT/WITH（4 case） | 全 PASS |
+| 9 | 路由表 | `/api/connectors/import-sql / import-data / nl2sql-import` 三个 POC-1/1.5/2A 端点 + `/api/agent/data-agent-streaming` 全在 |
+
+**当前边界（明确不包含）**
+
+* ❌ POC-2C（错误修复自循环增强）—— 已在用例 2 中确认 DataAgent 既有 max_tool_rounds=12 自循环对绝大多数场景已足够稳健
+* ❌ DataAgent 不兼容 reasoning 模型（thinking mode）—— `_call_llm_once` 不处理 `reasoning_content` 回传是 DataAgent 既有限制，POC-2B 不引入跨模块修复
+* ❌ 前端 UI / NDJSON 新事件类型 / `table_registered` 注册 —— DataAgent 既有 `result/action` 事件已闭环（用户最终图表通过 visualize→result 路径展示，中间 parquet 表存 workspace 不显示在 sidebar）
+* ❌ `connector_import_sql / connector_import_data / nl2sql-import` 端点重构（POC-1/1.5/2A 行为完全锁定）
+* ❌ BeelinkDataLoader 改动；beelink Java 改动；SQL Guard / SQL 修复 Agent / 强 BO / 强 RAG / MCP-first
+
 ---
 
 ## 15. 后续从 POC 演进到正式产品需要补的能力

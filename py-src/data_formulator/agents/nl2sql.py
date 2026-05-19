@@ -244,6 +244,78 @@ def _call_llm_for_sql(client, messages: list[dict[str, Any]]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# 共享 helper：SQL 浅校验 → 执行 → 落 workspace
+# ---------------------------------------------------------------------------
+
+def execute_sql_to_workspace(
+    *,
+    loader,
+    workspace,
+    sql: str,
+    table_name: str,
+    import_options: dict[str, Any] | None = None,
+    extra_import_options: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """POC-2A `run_nl2sql` 与 POC-2B `query_beelink_sql` tool handler 共享的执行+写入段。
+
+    职责
+    ----
+    * 用 :func:`_is_select_or_with` 做浅校验（只放过 SELECT / WITH）。
+    * 复用 POC-1.5 ``loader.fetch_sql_as_arrow`` 执行 SQL（行为锁定）。
+    * 用 ``workspace.get_fresh_name(table_name)`` 避免覆盖 POC-1/1.5/2A 已有同名表。
+    * 落 ``source_query=sql`` 到 TableMetadata；``import_options`` 合并
+      ``extra_import_options``（如 ``nl2sql_question`` / 调用方上下文）。
+
+    Raises
+    ------
+    ValueError
+        ``sql`` 非空但非 SELECT/WITH（浅校验失败）。
+    BeelinkAPIError
+        beelink 端执行错（由 ``fetch_sql_as_arrow`` 抛）。
+    """
+    if not isinstance(sql, str) or not sql.strip():
+        raise ValueError("sql is required")
+    sql = sql.strip()
+    if not _is_select_or_with(sql):
+        first_80 = sql[:80].replace("\n", " ")
+        raise ValueError(
+            f"Only SELECT/WITH queries are allowed in POC-2; got: {first_80!r}"
+        )
+    if not isinstance(table_name, str) or not table_name.strip():
+        raise ValueError("table_name is required")
+
+    merged_options: dict[str, Any] = dict(import_options or {})
+    if extra_import_options:
+        merged_options.update(extra_import_options)
+
+    arrow_table = loader.fetch_sql_as_arrow(sql, import_options=import_options or {})
+
+    safe_name = workspace.get_fresh_name(table_name.strip())
+    source_info = {
+        "loader_type": loader.__class__.__name__,
+        "loader_params": loader.get_safe_params(),
+        "source_query": sql,
+        "import_options": merged_options,
+    }
+    meta = workspace.write_parquet_from_arrow(
+        table=arrow_table,
+        table_name=safe_name,
+        source_info=source_info,
+    )
+    return {
+        "table_name": meta.name,
+        "row_count": meta.row_count,
+        "columns": [
+            {"name": c.name, "dtype": c.dtype}
+            for c in (meta.columns or [])
+        ],
+        "sql": sql,
+        "source_query": sql,
+        "refreshable": False,
+    }
+
+
+# ---------------------------------------------------------------------------
 # 主流程
 # ---------------------------------------------------------------------------
 
@@ -331,41 +403,16 @@ def run_nl2sql(
 
     if not isinstance(sql_value, str):
         raise ValueError(f"LLM returned invalid sql type: {type(sql_value).__name__}")
-    sql = sql_value.strip()
 
-    # 4) 浅校验：只允许 SELECT / WITH，其它一律拒
-    if not _is_select_or_with(sql):
-        first_80 = sql[:80].replace("\n", " ")
-        raise ValueError(
-            f"Only SELECT/WITH queries are allowed in POC-2; got: {first_80!r}"
-        )
-
-    # 5) 执行 SQL → pa.Table（复用 POC-1.5 fetch_sql_as_arrow，行为锁定）
-    arrow_table = loader.fetch_sql_as_arrow(sql, import_options=import_options)
-
-    # 6) 落 workspace —— source_info 与 import-sql 同款；额外把 nl2sql_question
-    #    塞进 import_options，便于后续追溯"这个表是哪句话生成的"
-    safe_name = sanitize_table_name(table_name.strip())
-    source_info = {
-        "loader_type": loader.__class__.__name__,
-        "loader_params": loader.get_safe_params(),
-        "source_query": sql,
-        "import_options": {**import_options, "nl2sql_question": question.strip()},
-    }
-    meta = workspace.write_parquet_from_arrow(
-        table=arrow_table,
-        table_name=safe_name,
-        source_info=source_info,
+    # 4-6) 浅校验 + 执行 + 落 workspace 全部托管给共享 helper（POC-2B tool 也走它）。
+    #     ``rationale`` 是 NL2SQL 路径独有的 LLM 解释，helper 不感知，由本函数拼回。
+    result = execute_sql_to_workspace(
+        loader=loader,
+        workspace=workspace,
+        sql=sql_value,
+        table_name=table_name,
+        import_options=import_options,
+        extra_import_options={"nl2sql_question": question.strip()},
     )
-    return {
-        "table_name": meta.name,
-        "row_count": meta.row_count,
-        "columns": [
-            {"name": c.name, "dtype": c.dtype}
-            for c in (meta.columns or [])
-        ],
-        "sql": sql,
-        "source_query": sql,
-        "rationale": rationale,
-        "refreshable": False,
-    }
+    result["rationale"] = rationale
+    return result

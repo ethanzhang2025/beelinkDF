@@ -273,6 +273,53 @@ TOOLS = [
             },
         },
     },
+    # POC-2B: 把 Dremio SELECT/WITH SQL 推送给已连接的 beelink 数据源执行
+    {
+        "type": "function",
+        "function": {
+            "name": "query_beelink_sql",
+            "description": (
+                "Push a Dremio SELECT/WITH SQL query to a connected beelink data "
+                "source. The result is registered as a new workspace table (parquet) "
+                "that you can reference in subsequent explore/visualize calls.\n\n"
+                "USE WHEN: the relevant table is in beelink but NOT yet imported, "
+                "AND the question requires aggregation/filtering that would be "
+                "wasteful to run after a full-table import.\n"
+                "DO NOT USE for tables already in the workspace — use explore(python) "
+                "with duckdb on those parquet files instead.\n\n"
+                "SYNTAX: reference tables with quoted multi-segment paths, e.g. "
+                '"smartquery_demo"."customers". Only SELECT or WITH (CTE) statements '
+                "are accepted; INSERT/UPDATE/DELETE/DROP/CREATE/ALTER will be rejected."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "purpose": {
+                        "type": "string",
+                        "description": "One short user-facing line shown as progress.",
+                    },
+                    "connector_id": {
+                        "type": "string",
+                        "description": "Connector instance id, e.g. 'beelink:beelink-main'.",
+                    },
+                    "sql": {
+                        "type": "string",
+                        "description": "A single Dremio SELECT or WITH statement.",
+                    },
+                    "table_name": {
+                        "type": "string",
+                        "description": "snake_case name for the resulting workspace table.",
+                    },
+                    "max_rows": {
+                        "type": "integer",
+                        "default": 10000,
+                        "description": "Max rows to fetch (hard cap MAX_IMPORT_ROWS).",
+                    },
+                },
+                "required": ["purpose", "connector_id", "sql", "table_name"],
+            },
+        },
+    },
 ]
 
 
@@ -412,6 +459,25 @@ entirely if no useful chart-producing follow-ups exist.
 - **Never** repeat a visualization already in the trajectory.
 - Present after at most {max_iterations} visualization steps.
 
+## When to use `query_beelink_sql` vs `explore(python)`
+
+- **`query_beelink_sql`** pushes a Dremio SELECT/WITH query down to a connected
+  beelink data source. Prefer it when:
+  - The relevant table lives in beelink but is NOT yet imported to the workspace.
+  - The question requires server-side aggregation/filtering that would be
+    wasteful to do client-side on a full-table import.
+- **`explore(python)`** with duckdb on existing parquet is preferred when the
+  needed tables are ALREADY in the workspace (use `search_data_tables` to
+  check). Don't re-pull data you already have.
+- After `query_beelink_sql` succeeds, use the returned `table_name` in a
+  follow-up `explore` (e.g. `duckdb.query("SELECT ... FROM '<table>.parquet'")`)
+  or directly in a `visualize` action's `input_tables`.
+- **SQL rules**: only SELECT or WITH (CTE). NEVER emit INSERT/UPDATE/DELETE/
+  DROP/CREATE/ALTER/TRUNCATE/MERGE — the tool will reject them. Reference
+  tables with quoted multi-segment paths exactly as the catalog shows them,
+  e.g. `"smartquery_demo"."customers"`. Use only columns confirmed via
+  `read_catalog_metadata`.
+
 {agent_exploration_rules}
 '''
 
@@ -442,6 +508,9 @@ class DataAgent:
         self.language_instruction = language_instruction
         self.max_iterations = max_iterations
         self.max_repair_attempts = max_repair_attempts
+        # POC-2B: 保留 identity_id 供 query_beelink_sql tool handler 在
+        # user-scoped DATA_CONNECTORS 中查找当前用户的 beelink connector
+        self._identity_id = identity_id
 
         from data_formulator.agents.reasoning_log import (
             ReasoningLogger, _NullReasoningLogger,
@@ -1702,6 +1771,17 @@ class DataAgent:
                             "status": "ok",
                             "stdout": tool_content,
                         }
+                    elif tool_name == "query_beelink_sql":
+                        # POC-2B：DataAgent 把 SQL 推给 beelink 执行，结果落 workspace
+                        # 后再由 LLM 在下一轮用 explore / visualize 使用
+                        tool_content, tool_status = self._handle_query_beelink_sql(tool_args)
+                        yield {
+                            "type": "tool_result",
+                            "tool": tool_name,
+                            "status": tool_status,
+                            "stdout": tool_content if tool_status == "ok" else "",
+                            "error": tool_content if tool_status == "error" else None,
+                        }
                     elif tool_name in ("visualize", "clarify", "explain", "present", "action"):
                         action_data = dict(tool_args)
                         if "action" not in action_data:
@@ -2037,6 +2117,74 @@ class DataAgent:
         except Exception as exc:
             logger.warning("read_knowledge tool error: %s", type(exc).__name__)
             return f"Error reading knowledge: {type(exc).__name__}"
+
+    def _handle_query_beelink_sql(self, tool_args: dict) -> tuple[str, str]:
+        """POC-2B：把 LLM 给定的 Dremio SQL 推送给 beelink 执行并落 workspace。
+
+        返回 ``(tool_content, tool_status)``，``tool_status`` ∈ {"ok", "error"}。
+        失败时 ``tool_content`` 含 beelink 原始 errorMessage 关键片段，方便 LLM
+        在下一轮 ``_tool_loop`` 自修 SQL；不打 password/token/cookie。
+        """
+        # 局部 import：避免 DataAgent 模块加载时拉入 connector 栈
+        import json as _json
+        from data_formulator.data_connector import DATA_CONNECTORS, _user_connector_key
+        from data_formulator.agents.nl2sql import execute_sql_to_workspace
+
+        cid = (tool_args.get("connector_id") or "").strip()
+        sql = tool_args.get("sql") or ""
+        table_name = (tool_args.get("table_name") or "agent_query").strip() or "agent_query"
+        max_rows = tool_args.get("max_rows", 10000)
+
+        if not cid:
+            return ("query_beelink_sql failed: connector_id is required", "error")
+
+        # 用 DataAgent 自身 identity 拼 user-scoped key（DataAgent ctor 已收到 identity_id）
+        identity = self._identity_id_for_connector_lookup()
+        connector = None
+        if identity:
+            connector = DATA_CONNECTORS.get(_user_connector_key(identity, cid))
+        if connector is None:
+            connector = DATA_CONNECTORS.get(cid)
+        if connector is None:
+            return (
+                f"query_beelink_sql failed: connector '{cid}' not found in registry. "
+                f"Hint: ensure the connector is connected for the current identity.",
+                "error",
+            )
+
+        try:
+            loader = connector._require_loader()
+            if not hasattr(loader, "fetch_sql_as_arrow"):
+                return (
+                    f"query_beelink_sql failed: connector '{cid}' does not support "
+                    f"raw SQL pass-through (only beelink loaders do).",
+                    "error",
+                )
+            result = execute_sql_to_workspace(
+                loader=loader,
+                workspace=self.workspace,
+                sql=sql,
+                table_name=table_name,
+                import_options={"size": max_rows},
+            )
+            # 喂回 LLM 的是 JSON 字符串，让下一轮 LLM 引用 result.table_name 时不歧义
+            payload = {"status": "ok", **result}
+            return (_json.dumps(payload, ensure_ascii=False), "ok")
+        except ValueError as exc:
+            # 浅校验失败（非 SELECT/WITH）或 table_name 非法：是 LLM 出错，让它自修
+            return (f"query_beelink_sql failed: {exc}", "error")
+        except Exception as exc:
+            # beelink 端错（权限/字段不存在/SQL 语法/job 超时等）：保留原始 message
+            # 让 LLM 在下一轮看到 errorMessage 自修 SQL。type+str 双保留便于诊断。
+            return (
+                f"query_beelink_sql failed: {type(exc).__name__}: {str(exc)[:500]}",
+                "error",
+            )
+
+    def _identity_id_for_connector_lookup(self) -> str:
+        """拿 DataAgent 当前 identity_id（兼容 ctor 未传 / 中途为 None 的情况）。"""
+        ident = getattr(self, "identity_id", None) or getattr(self, "_identity_id", None)
+        return ident or ""
 
     # ------------------------------------------------------------------
     # Helpers
