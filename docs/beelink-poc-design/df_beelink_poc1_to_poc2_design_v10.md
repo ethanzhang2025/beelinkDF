@@ -10,7 +10,7 @@
 
 ## 1. 总体结论
 
-**核心结论**：Data Formulator v0.7 自带的 `ExternalDataLoader` + `DataConnector` 框架已经能极低成本地把 beelink 接入为一个原生数据源；POC-1 到 POC-2 整个演进路径的"重活"几乎全在 DF 侧新增一个 `BeelinkDataLoader`（一个 Python 文件），其余配套（前端 UI、连接管理、Vault 凭证、catalog 缓存、Agent 工具）都可复用现成基础设施。beelink 侧**几乎不需要改动**——它原生的 `/api/v3/catalog`、`/api/v3/sql`、`/api/v3/job/{id}*`、`/login` 已经够用，权限裁决也已经由它自己完成。
+**核心结论**：Data Formulator v0.7 自带的 `ExternalDataLoader` + `DataConnector` 框架已经能极低成本地把 beelink 接入为一个原生数据源；POC-1 到 POC-2 整个演进路径的"重活"几乎全在 DF 侧新增一个 `BeelinkDataLoader`（一个 Python 文件），其余配套（前端 UI、连接管理、Vault 凭证、catalog 缓存、Agent 工具）都可复用现成基础设施。beelink 侧**几乎不需要改动**——它原生的 `/api/v3/catalog`、`/api/v3/sql`、`/api/v3/job/{id}*`、`/apiv2/login` 已经够用，权限裁决也已经由它自己完成。
 
 **最小可走通路径**（基于源码实测）：
 
@@ -250,10 +250,10 @@ description: str
 
 `LogInLogOutResource.java`（`dac/backend/.../resource/LogInLogOutResource.java`）：
 
-- `POST /login`（L108）→ body `{userName, password}` → 返回 `UserLoginSession`
-- `POST /login/byCode?code=<encrypted>`（L204）→ 中台 SSO 后再登录
-- `DELETE /login`（L301）→ logout
-- `GET /login`（L305）→ `isUserAuthorized()`
+- `POST /apiv2/login`（L108）→ body `{userName, password}` → 返回 `UserLoginSession`
+- `POST /apiv2/login/byCode?code=<encrypted>`（L204）→ 中台 SSO 后再登录
+- `DELETE /apiv2/login`（L301）→ logout
+- `GET /apiv2/login`（L305）→ `isUserAuthorized()`
 
 `UserLoginSession` 字段（UserLoginSession.java）：
 
@@ -278,7 +278,7 @@ userCreatedAt, clusterId, version, clusterCreatedAt
 
 `ZTSSOLoginServlet.java`：
 
-- 路径：servlet 注册路径未在源码中直接看到，但功能是 `GET ?token=...&redirect=...` → 内部走 `ssoLogin(token, request)` 拿用户名 → SM4 加密 → 重定向到 `/login?code=<encrypted>` → 由 `loginByCode` 完成最终登录
+- 路径：servlet 注册路径未在源码中直接看到，但功能是 `GET ?token=...&redirect=...` → 内部走 `ssoLogin(token, request)` 拿用户名 → SM4 加密 → 重定向到 `/login?code=<encrypted>`（前端 SPA route） → 由 `loginByCode` 完成最终登录
 - **POC 阶段不必走这套**；BeelinkDataLoader 用普通用户名/密码 + DF Vault 即可
 
 ### 4.3 权限模型
@@ -387,7 +387,7 @@ GET /api/v3/job/{id}/results?offset=0&limit=100
 
 | 用途 | beelink 端点 | 是否需要新增 |
 |------|--------------|--------------|
-| 登录拿 token | `POST /login` | ❌ 直接用 |
+| 登录拿 token | `POST /apiv2/login` | ❌ 直接用 |
 | 列我可见的 sources/spaces/homes | `GET /api/v3/catalog?include=children` | ❌ 直接用，按 token 自动过滤 |
 | 列某个 source/folder 的子项 | `GET /api/v3/catalog/{id}?maxChildren=1000&pageToken=...` | ❌ |
 | 拿 Dataset 的 schema（列定义） | `GET /api/v3/catalog/by-path/<seg>...?include=dataset` | ❌ |
@@ -412,7 +412,7 @@ GET /api/v3/job/{id}/results?offset=0&limit=100
    - `base_url`: `http://beelink.host:9047`
    - `user`: 我的 beelink 用户名
    - `password`: 我的 beelink 密码（sensitive，存 Vault）
-3. 点 **Connect** → DF 后端调 `BeelinkDataLoader.__init__(params)` → 内部走 `POST /login` 拿 token → `test_connection()` 调 `GET /api/v3/catalog` 验证
+3. 点 **Connect** → DF 后端调 `BeelinkDataLoader.__init__(params)` → 内部走 `POST /apiv2/login` 拿 token → `test_connection()` 调 `GET /api/v3/catalog` 验证
 4. 连接成功后弹出 catalog tree（来自 `loader.list_tables()`）
 5. 用户点 "Sync metadata" → DF 调 `POST /api/connectors/sync-catalog-metadata` → 落 disk cache（后续 DataAgent 能搜到）
 6. 用户在 tree 中找到一张表（如 `mysql_prod.sales.orders`）→ 点 **Import**
@@ -422,15 +422,23 @@ GET /api/v3/job/{id}/results?offset=0&limit=100
 
 ### 5.3 后端流程
 
+> **前置条件（POC-1 真机实测纠正）**：必须先 `POST /api/sessions/create
+> {"id":"default","name":"default"}` 建一个 active workspace，且所有后续请求都
+>带 `X-Workspace-Id: default` 头；否则 import-data 返回 `INVALID_REQUEST: No
+> active workspace`。前端 `UnifiedDataUploadDialog` 已自动注入该头，命令行直
+> 调 REST 时要自己加。
+
 ```
 [前端] POST /api/connectors/import-data
-       { source_id: "beelink", source_table: "mysql_prod.sales.orders",
-         table_name?: "orders", import_options: {size: 10000} }
+       Headers: X-Identity-Id: <type:id>, X-Workspace-Id: default
+       { connector_id: "beelink:beelink-main",
+         source_table: "smartquery_demo.customers",
+         table_name?: "customers", import_options: {size: 10000} }
 
 [后端 connector_import_data] (data_connector.py:1564)
-  ├─ _resolve_connector(data) → DataConnector instance for "beelink"
+  ├─ _resolve_connector(data) → DataConnector by connector_id
   ├─ loader = source._require_loader()        # 拿到 per-identity BeelinkDataLoader
-  ├─ raw_source = "mysql_prod.sales.orders"
+  ├─ raw_source = "smartquery_demo.customers"
   ├─ source_id, source_name = _parse_source_table(raw_source)
   ├─ workspace = get_workspace(get_identity_id())
   ├─ safe_name = sanitize_table_name("orders")
@@ -453,10 +461,10 @@ GET /api/v3/job/{id}/results?offset=0&limit=100
 `UnifiedDataUploadDialog.tsx` 已实现以下流程，**只需自动接管 Beelink**：
 
 ```ts
-// 1. 用户点 "Import" 按钮，触发：
+// 1. 用户点 "Import" 按钮，触发（POC-1 实测纠正：body 字段名是 connector_id，不是 source_id）：
 const resp = await apiRequest(CONNECTOR_ACTION_URLS.IMPORT_DATA, {
     method: 'POST',
-    body: { source_id, source_table, table_name, import_options }
+    body: { connector_id, source_table, table_name, import_options }
 });
 
 // 2. 后端返回 { table_name, row_count, refreshable }，前端构造 DictTable：
@@ -464,7 +472,7 @@ const tableWithSource: DictTable = createDictTable(resp.data.table_name, [], und
     { tableId: resp.data.table_name, rowCount: resp.data.row_count },
     /*anchored*/ true,
     /*description*/ '',
-    { type: 'database', connectorId: source_id, databaseTable: resp.data.table_name,
+    { type: 'database', connectorId: connector_id, databaseTable: resp.data.table_name,
       canRefresh: resp.data.refreshable, originalTableName: source_table } );
 
 // 3. dispatch loadTable thunk → 调 GET /api/tables/get-table?name=... → 拉前 N 行预览 → 进 Redux
@@ -479,7 +487,7 @@ await dispatch(loadTable({ table: tableWithSource }));
 |------|------|-----------|------|
 | beelinkDF | `py-src/data_formulator/data_loader/beelink_data_loader.py` | **新增** | `BeelinkDataLoader` 类实现 |
 | beelinkDF | `py-src/data_formulator/data_loader/__init__.py` | **修改 1 行** | 在 `_LOADER_SPECS` 列表追加 `("beelink", "data_formulator.data_loader.beelink_data_loader", "BeelinkDataLoader", "requests")` |
-| beelinkDF | `py-src/data_formulator/app.py` | **修改 ~5 行** | 在 `register_data_connectors()` 内添加 `DataConnector.from_loader(BeelinkDataLoader, source_id="beelink", display_name="Beelink", icon="beelink")` |
+| beelinkDF | `py-src/data_formulator/app.py` | **不改**（POC-1 实测纠正） | `register_data_connectors` 只挂 admin-pinned；普通 loader 通过 `DATA_LOADERS` dict 自动 discovery，用户走 UI `POST /api/connectors` 自建实例即可 |
 | beelinkDF | `src/icons.tsx`（可选） | 修改 | 注册 Beelink icon |
 | beelinkDF | `src/i18n/locales/zh/common.json` & `en/common.json`（可选） | 修改 | 添加 Beelink 文案 |
 | beelink_wenshu | （无） | —— | beelink 一行 Java 都不用改 |
@@ -487,7 +495,7 @@ await dispatch(loadTable({ table: tableWithSource }));
 ### 5.6 beelink 最小 API（DF 调用清单）
 
 ```
-POST {base_url}/login
+POST {base_url}/apiv2/login
   Body: { userName, password }
   Header: Content-Type: application/json
   返回: { token, userId, userName, expires, admin, roleId, orgId, ... }
@@ -843,7 +851,7 @@ BeelinkDataLoader.list_params() = [
    default:"", description:"e.g. http://beelink:9047"},
   {name:"user", type:"string", required:True, tier:"auth"},
   {name:"password", type:"string", required:True, tier:"auth", sensitive:True,
-   description:"Used to login via POST /login; never stored in metadata"}
+   description:"Used to login via POST /apiv2/login; never stored in metadata"}
 ]
 
 BeelinkDataLoader.auth_mode() = "connection"
@@ -857,7 +865,7 @@ BeelinkDataLoader.__init__(params):
   self._login()   # → 拿 token 存内存 self.token + self.token_expires_at
 
 BeelinkDataLoader._login():
-  r = self.session.post(f"{self.base_url}/login",
+  r = self.session.post(f"{self.base_url}/apiv2/login",
                         json={"userName": self.user, "password": self.password},
                         timeout=10)
   r.raise_for_status()
@@ -892,7 +900,7 @@ DF 后端 BeelinkDataLoader 改 `auth_config = {mode:"delegated", login_url:"/ss
 
 ### 8.4 方案 C：正式 SSO（token-exchange）
 
-DF 后端实现一个新 `AuthProvider`（如 `BeelinkAuthProvider`），其 `authenticate(request)` 读取 beelink token（cookie 或 Authorization header），调 beelink `POST /login/isUserAuthorized`（已有）或新增 `POST /api/v3/whoami` 拿到 username + roleId，构造 `AuthResult(user_id=username, raw_token=token, ...)`。
+DF 后端实现一个新 `AuthProvider`（如 `BeelinkAuthProvider`），其 `authenticate(request)` 读取 beelink token（cookie 或 Authorization header），调 beelink `GET /apiv2/login`（即 `isUserAuthorized`，返回 boolean）做存活校验、或新增 `POST /api/v3/whoami` 拿到 username + roleId，构造 `AuthResult(user_id=username, raw_token=token, ...)`。
 
 - DF `get_identity_id()` → 自动返回 `user:<username>`
 - DF `get_sso_token()` → 自动返回 beelink token
@@ -1193,12 +1201,16 @@ POC 阶段**优先使用 DF 已有的 `/api/connectors/*` 路由族**：
 | 用途 | 端点 | 备注 |
 |------|------|------|
 | 列连接 | `GET /api/connectors` | 当前 identity 的实例 |
-| 创建 | `POST /api/connectors` | body 含 source_id + user_params |
-| 浏览目录 | `POST /api/connectors/get-catalog-tree` | body `{source_id, filter?}` |
+| 创建 | `POST /api/connectors` | body 含 **`loader_type`** + `source_id` + `display_name` + `params`（POC-1 实测） |
+| 浏览目录 | `POST /api/connectors/get-catalog-tree` | body `{connector_id, filter?}` |
 | 同步缓存 | `POST /api/connectors/sync-catalog-metadata` | 后续 search_data_tables 用 |
-| 导入 | `POST /api/connectors/import-data` | body 见 §5.3 |
-| 刷新 | `POST /api/connectors/refresh-data` | body `{source_id, table_name}` |
-| 预览 | `POST /api/connectors/preview-data` | body `{source_id, source_table, limit}` |
+| 导入 | `POST /api/connectors/import-data` | body 见 §5.3；需 `X-Workspace-Id` 头 + 先 `POST /api/sessions/create` |
+| 刷新 | `POST /api/connectors/refresh-data` | body `{connector_id, table_name}` |
+| 预览 | `POST /api/connectors/preview-data` | body `{connector_id, source_table, limit}` |
+
+> **`connector_id` 的真实格式**（POC-1 实测）：`<loader_type>:<safe-source-id>`，
+> 如 `beelink:beelink-main`（dash 不是 underscore；`POST /api/connectors` 时
+> 提交的 `source_id="beelink_main"` 会被规范化为 `beelink-main`）。
 
 ### 10.7 错误码约定
 
@@ -1277,7 +1289,7 @@ POC-1、POC-1.5、POC-2 均**不需要改 beelink**。以下是**可选**优化�
   python -m data_formulator
   ```
 - beelink 本地启动（按现有文档）：`mvn package` → 启 daemon → 用 beelink Web 验证登录 + 跑一个 SQL
-- 验证 beelink REST 可达：手工 curl 走通 `POST /login`、`GET /api/v3/catalog`、`POST /api/v3/sql`、`GET /api/v3/job/{id}*`
+- 验证 beelink REST 可达：手工 curl 走通 `POST /apiv2/login`、`GET /api/v3/catalog`、`POST /api/v3/sql`、`GET /api/v3/job/{id}*`
 
 **完成标准**：手工 curl 全链路可走通；DF 本地能跑现有 PostgreSQL connector。
 
@@ -1332,7 +1344,7 @@ POC-1、POC-1.5、POC-2 均**不需要改 beelink**。以下是**可选**优化�
 
 | 风险 | 概率 | 影响 | 降级 |
 |------|------|------|------|
-| beelink `POST /login` 协议变更 | 低 | POC-1 全停 | 在 BeelinkClient 内适配；保留 `Bearer <token>` 旁路 |
+| beelink `POST /apiv2/login` 协议变更 | 低 | POC-1 全停 | 在 BeelinkClient 内适配；保留 `Bearer <token>` 旁路 |
 | beelink `limit≤500` 太小，导致大表导入慢 | 中 | POC-1 性能差 | POC 默认 size=10000；UI 暴露 size 调整；后续推 beelink 改硬上限 |
 | beelink Catalog 递归深、节点多导致 sync 慢 | 中 | UX 卡 | sync 异步化 + 增量；首次仅 sync 用户最近 spaces |
 | LLM 生成的 Dremio SQL 用错引号/方言 | 高 | POC-2 失败率高 | SYSTEM_PROMPT 给 1-2 个 Dremio SQL 范例；错误透传后自动重试 |
@@ -1397,6 +1409,60 @@ POC-1、POC-1.5、POC-2 均**不需要改 beelink**。以下是**可选**优化�
 > 2. 重新登录，Beelink connector 自动恢复（Vault），workspace 内的表仍在，图仍在
 
 **通过条件**：刷新后 < 3s 恢复，无需重输密码。
+
+### 14.6 POC-1 真机验收记录（2026-05-19）
+
+> 本节为 POC-1 提交前在本机跑通的真实验证证据，凡与文档其他章节不一致处，
+> **以本节为准**（其它章节据此回写）。
+
+**测试环境**
+
+| 项 | 值 |
+|---|---|
+| beelink 服务 | 本机 `http://localhost:8998`（Dremio v25.2.0-202410241428100111-a963b970） |
+| beelink 账号 | `beelink`（admin） |
+| DF 服务 | 本机 `http://127.0.0.1:5500`（venv：Python 3.13） |
+| DF Identity | `local:beelink`（本机模式自动用 OS username） |
+| 工作目录 | `~/beelinkDF`（feat/beelink-poc1-loader） |
+| 上轮提交 | `5a54e9a feat(loader): 接入 beelink 作为 DF 数据源 POC-1` |
+
+**验收链路（全部 PASS）**
+
+1. **Phase 0 REST 6 步**：`POST /apiv2/login` → `GET /api/v3/catalog` → `GET /api/v3/catalog/{id}?maxChildren=20` → `POST /api/v3/sql` → `GET /api/v3/job/{id}` 轮询 → `GET /api/v3/job/{id}/results?limit=500`，全通过；jobState=COMPLETED，rowCount=1。
+2. **`GET /api/data-loaders`**：返回 11 个 loaders 含 `beelink`；hierarchy=`[source,table]`；auth_mode=`connection`；params_form=`[base_url, user, password, verify_ssl, table_filter]`。
+3. **`POST /api/connectors`**：`{loader_type:"beelink", source_id:"beelink_main", params:{...}}` → 返回 `{id:"beelink:beelink-main", connected:true}`（注意 source_id `beelink_main` 被规范化为 `beelink-main`）。
+4. **`POST /api/connectors/get-catalog-tree`**：`{connector_id:"beelink:beelink-main"}` → 3 个 namespace（test / smartquery_demo / tpcds_sf10），合计 8+ 张 DATASET。
+5. **`POST /api/connectors/preview-data`**：smartquery_demo.customers 前 5 行，6 列；首行 `{"id":1,"name":"客户_00001","gender":"女",...}` 中文 UTF-8 完整。
+6. **`POST /api/sessions/create`**：`{"id":"default"}` 建 active workspace。
+7. **`POST /api/connectors/import-data`**：`{connector_id, source_table:"smartquery_demo.customers", table_name:"customers", import_options:{size:1000}}` → `{table_name:"customers", row_count:1000, refreshable:true}`，**1000 行真落 parquet 入 DF workspace**。
+8. **`GET /api/tables/list-tables`**（`X-Workspace-Id: default`）：返回 customers 完整 6 列元数据 + sample_rows。
+9. **`GET /api/app-config`**：`CONNECTED_CONNECTORS=["beelink:beelink-main"]`，`CONNECTORS[0]={source_id:"beelink:beelink-main", name:"Beelink Main", ...}` —— 前端拿到这个就能渲染卡片。
+10. **DF 重启后**：connector 自动从 Vault 恢复，无需重输密码。
+11. **UI 真实交互**：Playwright headless 打开 `http://127.0.0.1:5500/`，点 sidebar "Data connectors" 按钮，主区域出现 **"Beelink Main / BeelinkDataLoader"** 卡片，与 "Link local folder" / "Connect databases" 并排；左侧 Data Connectors 抽屉展开真实 catalog 树（含 customers / products / regions / channels / sales_orders / categories / tpcds_sf10 全套）。
+
+**截图（POC-1 UI 验收证据）**
+
+- `docs/beelink-poc-design/screenshots/beelink_card_row.png` —— Beelink Main 卡片近景
+- `docs/beelink-poc-design/screenshots/df_connectors_dialog.png` —— 完整 dashboard（左侧 catalog 树 + 主区卡片网格）
+- `docs/beelink-poc-design/screenshots/df_landing.png` —— DF 首屏 landing
+
+**当前边界（明确不包含，需新分支推进）**
+
+- ❌ POC-1.5 手写 SQL 直通端点（`POST /api/beelink/sql/execute`）
+- ❌ POC-2 NL → Dremio SQL（DataAgent 工具扩展 `query_beelink_sql`）
+- ❌ DataAgent 任何改动
+- ❌ 前端 UI 任何改动
+- ❌ beelink Java 任何改动
+
+**已知注意事项（踩坑实录）**
+
+1. **登录端点真实路径**：`/apiv2/login` 不是 `/login`。Dremio v25 的 V2 API 由 `RestServerV2.java:40` 用 `@RestApiServer(pathSpec="/apiv2/*")` 挂载；`LogInLogOutResource.java` 的 `@Path("/login")` 是相对路径。设计文档原先据 `@Path` 直接推断的 URL 是错的，本次已修正脚本与 BeelinkDataLoader。
+2. **默认测试 SQL 避保留字**：用 `SELECT 1 AS n` 不要用 `SELECT 1 AS one` —— Dremio Calcite 解析器把 `one / two / three / day / month / year / level / value` 等当保留字，否则报 `Encountered "AS one"...Was expecting one of: ...`。
+3. **REST body 字段名**：`POST /api/connectors` 用 **`loader_type`**；其余共享动作端点（preview / get-catalog-tree / import-data / refresh-data）用 **`connector_id`**（格式 `<loader_type>:<safe-source-id>`），不是 `source_id`。
+4. **import-data 前置**：必须先 `POST /api/sessions/create {"id":"default","name":"default"}` 建 workspace，且后续请求带 `X-Workspace-Id: default` 头。前端 `UnifiedDataUploadDialog` 自动注入，curl 直调要自己加。
+5. **页大小硬上限**：`GET /api/v3/job/{id}/results?limit=` 单次最大 500（JobResource.java:125 `Preconditions.checkArgument(limit <= 500, ...)`）。BeelinkDataLoader 已自动分页。
+6. **DF Bash background process 容易被 parent shell 一起 kill**（exit 144）。本机调试启 Flask 用 `setsid + < /dev/null + disown` 才能完全脱离。
+7. **首屏 Select Models 强引导**：未配 LLM 时 DF 默认 landing 拦截 DataThread；不影响 connector 功能本身，只是体验上需要先去 Settings 选个 model 才能进 Data Thread 做图。
 
 ---
 
@@ -1578,6 +1644,21 @@ DF 框架明确禁止——所有现有 loader 都遵守这条。绕过它意味
 | 错误处理 | beelink errorMessage 透传 + 标准 error code 包装 |
 | 性能 | POC size=10000；用户可调；max=2M |
 
+### 迭代 #14（2026-05-19 真机实测纠正）：POC-1 落地后修正三处"看着对其实错"的事实
+
+POC-1 BeelinkDataLoader 落地真机一跑就暴露出三处设计文档据"@Path/字面 API 名"
+直接推断却没核对 JAX-RS Application 前缀、Calcite 保留字、DF connector 框架
+真实 body schema 而踩的坑：
+
+| 错认 | 真相 | 影响范围 | 处置 |
+|------|------|----------|------|
+| beelink 登录是 `POST /login` | 是 **`POST /apiv2/login`**（`RestServerV2.java:40 @RestApiServer(pathSpec="/apiv2/*")` 是 JAX-RS Application 前缀） | Phase 0 脚本 + BeelinkDataLoader + 文档 §4.2/§5/§10/§12/§13/§A | 已全部修正；test_connection 也从 `GET /login` 改 `GET /apiv2/login` |
+| 默认 ping SQL `SELECT 1 AS one` | Dremio Calcite 把 `one` 当保留字，整条 SQL 被拒；用 **`SELECT 1 AS n`** | Phase 0 脚本 + env.example + README | 已修正；README 加保留字避坑清单 |
+| connector 共享端点 body 用 `source_id` | 实际用 **`connector_id`**（格式 `<loader_type>:<safe-source-id>`，dash 不是 underscore）；只有 `POST /api/connectors` 创建实例时是 `loader_type + source_id + params` | 文档 §5.3/§5.4/§10.6 | 已修正；保留 §10.5 POC-1.5 新设计端点的字段名待 POC-1.5 真正实现时再决定 |
+| `app.py` 需要修改 5 行注册 admin connector | **完全不用改**：`register_data_connectors` 只挂 admin-pinned；普通 loader 走 `DATA_LOADERS` dict 自动 discovery + 用户 UI 自建实例 | 文档 §5.5 | 已修正 |
+
+**收敛**：POC-1 真机端到端通过（见 §14.6），文档以本次回写为准。后续推进 POC-1.5 / POC-2 时如再发现新偏差，遵循同一原则：**真机为准，回写文档**。
+
 ---
 
 ## 附录 A：BeelinkDataLoader 关键方法骨架
@@ -1619,7 +1700,7 @@ class BeelinkDataLoader(ExternalDataLoader):
     @staticmethod
     def auth_instructions() -> str:
         return ("**Beelink 连接**：填入 Beelink 的 base URL（如 `http://beelink:9047`）"
-                "及您在 Beelink 中的用户名/密码。DF 会通过 `POST /login` 拿 token，"
+                "及您在 Beelink 中的用户名/密码。DF 会通过 `POST /apiv2/login` 拿 token，"
                 "并按您账号在 Beelink 中的权限访问数据。\n\n"
                 "密码加密存储在 DF Vault 中。")
 
@@ -1659,7 +1740,7 @@ class BeelinkDataLoader(ExternalDataLoader):
 
     def _login(self):
         r = self.session.post(
-            f"{self.base_url}/login",
+            f"{self.base_url}/apiv2/login",
             json={"userName": self.user, "password": self.password},
             timeout=_DEFAULT_TIMEOUT_SECS,
         )
@@ -1837,7 +1918,7 @@ class BeelinkDataLoader(ExternalDataLoader):
 
     def test_connection(self) -> bool:
         try:
-            self._request("GET", "/login")  # isUserAuthorized
+            self._request("GET", "/apiv2/login")  # isUserAuthorized
             return True
         except Exception:
             return False
