@@ -28,7 +28,7 @@ POC-2B 完成后即可在 DF 主界面通过 DataAgent 自然语言提问，由 
 | **POC-1** | beelink 表导入 | `BeelinkDataLoader`（722 行）+ `_LOADER_SPECS` 注册；端点 `POST /api/connectors/import-data` |
 | **POC-1.5** | 用户手写 SQL 直通导入 | `BeelinkDataLoader.fetch_sql_as_arrow`；端点 `POST /api/connectors/import-sql`；加固：`_clamp_timeout` + job 超时英文关键词 |
 | **POC-2A** | 独立后端 NL2SQL 导入 API | `agents/nl2sql.py`（421 行：`NL2SQL_SYSTEM_PROMPT` / `run_nl2sql` / `execute_sql_to_workspace` / `NL2SQLLLMError`）；端点 `POST /api/connectors/nl2sql-import`；加固：LLM 异常分流到 `LLM_AUTH_FAILED / LLM_RATE_LIMIT / LLM_TIMEOUT / LLM_UNKNOWN_ERROR` |
-| **POC-2B** | DataAgent 接入 beelink SQL tool | `data_agent.py` 第 9 个 tool `query_beelink_sql` + `_handle_query_beelink_sql`；SYSTEM_PROMPT 末尾追加决策提示；`self._identity_id` 持久化；与 POC-2A 共用 `execute_sql_to_workspace` helper |
+| **POC-2B** | DataAgent 接入 beelink SQL tool | `data_agent.py` 第 8 个 tool `query_beelink_sql`（在 POC-2A 时既有的 7 个 tool 之上追加）+ `_handle_query_beelink_sql`；SYSTEM_PROMPT 末尾追加决策提示；`self._identity_id` 持久化；与 POC-2A 共用 `execute_sql_to_workspace` helper |
 
 所有阶段：beelink Java 零改动；DF 前端 `src/` 零改动；DF 后端仅追加/加固，不破坏既有行为。
 
@@ -67,13 +67,13 @@ main
 | `py-src/data_formulator/data_loader/beelink_data_loader.py` | 722 | POC-1 / POC-1.5 | beelink loader：登录桥、catalog、`fetch_data_as_arrow`、`fetch_sql_as_arrow`、`_exec_sql_to_arrow`、`_clamp_timeout`、`BeelinkAPIError` |
 | `py-src/data_formulator/data_connector.py` | 2260 | POC-1 / POC-1.5 / POC-2A | 三个 HTTP 端点：`import-data` / `import-sql` / `nl2sql-import`；LLM 错误分流 `classify_and_wrap_llm_error` |
 | `py-src/data_formulator/agents/nl2sql.py` | 421 | POC-2A / POC-2B | `NL2SQL_SYSTEM_PROMPT`、`_is_select_or_with` 浅校验、`_call_llm_for_sql`、`run_nl2sql`、`execute_sql_to_workspace`（POC-2A/2B 共用 helper）、`NL2SQLLLMError` |
-| `py-src/data_formulator/agents/data_agent.py` | 2305 | POC-2B | 第 9 个 TOOLS 条目 `query_beelink_sql`、`_handle_query_beelink_sql` handler、SYSTEM_PROMPT 末尾决策提示、`self._identity_id` 持久化 |
+| `py-src/data_formulator/agents/data_agent.py` | 2305 | POC-2B | 第 8 个 TOOLS 条目 `query_beelink_sql`（POC-2A 时 TOOLS 为 7 个，POC-2B 追加后共 8 个）、`_handle_query_beelink_sql` handler、SYSTEM_PROMPT 末尾决策提示、`self._identity_id` 持久化 |
 | `scripts/beelink_phase0_probe.py` | 279 | Phase 0 | 纯 stdlib，6 步真机 REST 验证脚本（登录 / catalog / sql submit / job 轮询 / results / cleanup） |
 | `docs/beelink-poc-design/screenshots/` | — | UI 验收 | `beelink_card_row.png` / `df_connectors_dialog.png` / `df_landing.png` |
 | `docs/beelink-poc-design/df_beelink_poc1_to_poc2_design_v10.md` | 2250 | 全阶段 | 单一权威设计文档；§14.6/7/8/9 四份真机验收 |
 | `docs/handoff/会话交接-2026-05-19-v1.0.md` / `v2.0.md` | — | 全阶段 | 阶段冻结快照 |
 
-**未触碰**：`src/`（前端）、`~/beelink_wenshu/`（beelink Java 仓库，只读依赖）、DF agents 中 `data_agent.py` 既有 8 个 tool 行为、`context.py`、`client_utils.py`、`routes/agents.py`。
+**未触碰**：`src/`（前端）、`~/beelink_wenshu/`（beelink Java 仓库，只读依赖）、DF agents 中 `data_agent.py` 既有 7 个 tool 行为、`context.py`、`client_utils.py`、`routes/agents.py`。
 
 ---
 
@@ -84,7 +84,7 @@ main
 | `POST /api/connectors/import-data` | HTTP | POC-1 | DF 标准表导入；body `{connector_id, source_table, table_name, import_options}`；行为：beelink `SELECT *` + 分页 ≤500/页 → Arrow → workspace |
 | `POST /api/connectors/import-sql` | HTTP | POC-1.5 | 手写 SQL 直通；body `{connector_id, sql, table_name, import_options}`；行为：跳过 `_build_select_sql`，直接 `_exec_sql_to_arrow` |
 | `POST /api/connectors/nl2sql-import` | HTTP | POC-2A | 独立 NL2SQL；body `{connector_id, question, table_keys, table_name, model{...}, import_options}`；行为：LLM 单次调 → JSON `{sql,reason}` → `_is_select_or_with` 校验 → 执行 → workspace |
-| **DataAgent tool `query_beelink_sql`** | LLM tool | POC-2B | DataAgent 第 9 个 tool；参数 `{purpose, connector_id, sql, table_name, max_rows?}`（前 4 required）；行为：connector lookup → loader → `execute_sql_to_workspace` → 成功返 JSON / 失败保留 errorMessage 前 500 字符供 LLM 自修 |
+| **DataAgent tool `query_beelink_sql`** | LLM tool | POC-2B | DataAgent 第 8 个 tool（POC-2A 时既有 7 个，POC-2B 追加后共 8 个）；参数 `{purpose, connector_id, sql, table_name, max_rows?}`（前 4 required）；行为：connector lookup → loader → `execute_sql_to_workspace` → 成功返 JSON / 失败保留 errorMessage 前 500 字符供 LLM 自修 |
 
 所有 HTTP 端点统一通过 `X-Identity-Id` + `X-Workspace-Id` 头识别身份与 workspace；错误码统一走 `connector_errors` / `classify_and_wrap_llm_error` 分流。
 
@@ -195,7 +195,7 @@ git checkout feat/beelink-poc2b-dataagent-tool
 
 ### 10.3 启动 beelink
 
-beelink 实例：`http://localhost:8998`（admin：`beelink / beelink@123`）
+beelink 实例：`$BEELINK_URL`（占位示例 `http://localhost:8998`，admin 账号 `<BEELINK_USER>` / `<BEELINK_PASSWORD>`，请通过 shell 环境变量传入，不要写入文件）。
 若未起，依据 `~/beelink_wenshu/` 项目本身的 README 启动（本归档不复制 beelink 启动细节）。
 
 ### 10.4 启动 Data Formulator

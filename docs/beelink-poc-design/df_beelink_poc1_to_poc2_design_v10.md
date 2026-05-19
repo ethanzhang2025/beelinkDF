@@ -1518,7 +1518,8 @@ POC-1、POC-1.5、POC-2 均**不需要改 beelink**。以下是**可选**优化�
 * POC-2A = **独立后端 REST API**：用户自然语言 → LLM 生成 Dremio SQL → beelink
   执行 → 落 workspace。
 * **不接 DataAgent**：自带最小 system prompt，LLM 调用**不传 tools**，与
-  `agents/data_agent.py` 的 8 个 tool 全集解耦。
+  `agents/data_agent.py` 的 7 个 tool 全集解耦（POC-2A 阶段 DataAgent TOOLS 运行时实测 = 7；
+  POC-2B 追加 `query_beelink_sql` 后才变 8）。
 * `model` 字段从请求 body 传入（与 `/api/agent/data-agent-streaming` 同款契约），
   服务端用 `routes.agents.get_client(model_config)` 构造 LLM client；本轮真机
   使用 DeepSeek Pro 的 OpenAI-compatible API（`endpoint="openai"`,
@@ -1610,7 +1611,7 @@ POC-1、POC-1.5、POC-2 均**不需要改 beelink**。以下是**可选**优化�
 
 **定位（重要边界）**
 
-* POC-2B = **DataAgent tool 接入**：在 DataAgent 的 8 个工具基础上**追加**第 9 个工具 `query_beelink_sql`，让 LLM 在自循环里**自己**生成 Dremio SQL 作为 tool_args 传给后端执行——**不再**调用 POC-2A 的 `run_nl2sql` LLM 生成链路。
+* POC-2B = **DataAgent tool 接入**：在 DataAgent 既有的 7 个工具基础上**追加**第 8 个工具 `query_beelink_sql`（运行时实测：POC-2A 基线 TOOLS = 7，POC-2B 后 = 8），让 LLM 在自循环里**自己**生成 Dremio SQL 作为 tool_args 传给后端执行——**不再**调用 POC-2A 的 `run_nl2sql` LLM 生成链路。
 * schema context 由 DataAgent 既有的 `search_data_tables` + `read_catalog_metadata`（context.py）天然提供——**不新增** handler、**不依赖** POC-2A 的 schema 注入。
 * 执行+写入逻辑**复用** POC-2A 的 `execute_sql_to_workspace(loader, workspace, sql, table_name, ...)` helper（本轮从 `run_nl2sql` 抽出）；POC-2A `run_nl2sql` 内部改为复用同一 helper，行为契约不变（接口/返回字段/错误码 zero diff）。
 * 唯一可观察的副作用：helper 用 `workspace.get_fresh_name(table_name)` 取名，原本 POC-2A 中"重名覆盖"语义变为"自动加 `_2/_3` 后缀"——用户明文要求的鲁棒性增强，不算回归。
