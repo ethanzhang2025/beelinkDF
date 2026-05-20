@@ -122,7 +122,21 @@
     "demoBannerCta": "installation guide",
     "demoBannerSuffix": ".",
     "firstSelectModelPrefix": "First, let's",
-    "modelTip": "Models with strong coding and multimodal capabilities provide best experience with Data Formulator."
+    "modelTip": "Models with strong coding and multimodal capabilities provide best experience with Data Formulator.",
+    "yourSessions": "Your Sessions",
+    "sortNewest": "newest",
+    "sortOldest": "oldest",
+    "sortRecentlyModified": "recently modified",
+    "sortName": "name",
+    "sortNewestFirst": "newest first",
+    "sortOldestFirst": "oldest first",
+    "sortNameAZ": "name (a–z)",
+    "importWorkspaceZip": "Import workspace (.zip)",
+    "tooltipRename": "Rename",
+    "tooltipExport": "Export",
+    "tooltipDelete": "Delete",
+    "deleteSessionTitle": "Delete session?",
+    "deleteSessionDesc": "This will permanently delete {{name}} ({{id}}) and all its data."
   },
   "about": {
     "startExploration": "Start Exploration",
@@ -366,6 +380,7 @@
     "loaded": "Loaded",
     "unload": "Unload",
     "loadTable": "Load Table",
+    "loadInNewSession": "Load in new session",
     "sourceMetadata": "Source metadata",
     "noSourceMetadata": "No source metadata",
     "columnsCount": "columns",
@@ -451,7 +466,10 @@
     "sourceExtract": "Extracted",
     "failedRefreshDerivedTable": "Failed to refresh derived table \"{{table}}\": {{message}}",
     "errorRefreshingDerivedTable": "Error refreshing derived table \"{{table}}\"",
-    "alsoUses": "also uses"
+    "alsoUses": "also uses",
+    "derivationSummary": "Derivation summary",
+    "noMetadata": "No description available for this table.",
+    "viewMetadata": "View metadata"
   },
   "dataLoading": {
     "extractingData": "extracting data...",
@@ -784,7 +802,8 @@
     "knowledge": "Knowledge",
     "metadataPartial": "Partial metadata",
     "metadataUnavailable": "Metadata unavailable",
-    "saving": "Saving..."
+    "saving": "Saving...",
+    "configureConnector": "Edit connection"
   },
   "knowledge": {
     "title": "Agent Knowledge",

@@ -1779,7 +1779,7 @@ const DataSourceSidebarPanel: React.FC<{
                                         gap: 0.25,
                                     }}
                                 >
-                                    <Tooltip title="Rename">
+                                    <Tooltip title={t('dataThread.rename')}>
                                         <IconButton
                                             size="small"
                                             onClick={(e) => { e.stopPropagation(); startRenameSession(s.id, s.display_name); }}

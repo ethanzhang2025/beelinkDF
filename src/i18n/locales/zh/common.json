@@ -122,7 +122,21 @@
     "demoBannerCta": "安装指南",
     "demoBannerSuffix": "。",
     "firstSelectModelPrefix": "首先，请",
-    "modelTip": "具备较强编程和多模态能力的模型可提供更好的 Data Formulator 使用体验。"
+    "modelTip": "具备较强编程和多模态能力的模型可提供更好的 Data Formulator 使用体验。",
+    "yourSessions": "我的会话",
+    "sortNewest": "最新",
+    "sortOldest": "最旧",
+    "sortRecentlyModified": "最近修改",
+    "sortName": "名称",
+    "sortNewestFirst": "最新创建",
+    "sortOldestFirst": "最早创建",
+    "sortNameAZ": "名称 (a–z)",
+    "importWorkspaceZip": "导入会话 (.zip)",
+    "tooltipRename": "重命名",
+    "tooltipExport": "导出",
+    "tooltipDelete": "删除",
+    "deleteSessionTitle": "删除会话？",
+    "deleteSessionDesc": "将永久删除 {{name}}（{{id}}）及其所有数据。"
   },
   "about": {
     "startExploration": "开始探索",
@@ -366,6 +380,7 @@
     "loaded": "已加载",
     "unload": "卸载",
     "loadTable": "加载表",
+    "loadInNewSession": "在新会话中加载",
     "sourceMetadata": "源元数据",
     "noSourceMetadata": "暂无源元数据",
     "columnsCount": "列",
@@ -451,7 +466,10 @@
     "sourceExtract": "提取数据",
     "failedRefreshDerivedTable": "刷新派生表「{{table}}」失败：{{message}}",
     "errorRefreshingDerivedTable": "刷新派生表「{{table}}」时出错",
-    "alsoUses": "还使用了"
+    "alsoUses": "还使用了",
+    "derivationSummary": "推导摘要",
+    "noMetadata": "暂无该表描述。",
+    "viewMetadata": "查看元数据"
   },
   "dataGrid": {
     "loading": "加载中...",
@@ -784,7 +802,8 @@
     "knowledge": "知识库",
     "metadataPartial": "元数据不完整",
     "metadataUnavailable": "元数据不可用",
-    "saving": "保存中..."
+    "saving": "保存中...",
+    "configureConnector": "编辑连接"
   },
   "knowledge": {
     "title": "Agent 知识",

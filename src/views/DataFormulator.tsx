@@ -758,7 +758,7 @@ export const DataFormulatorFC = ({ }) => {
             <Box sx={{mt: 4}}>
                 <Divider sx={{width: '200px', mx: 'auto', mb: 2, fontSize: '1.2rem'}}>
                     <Typography sx={{ color: 'text.secondary' }}>
-                        Your Sessions
+                        {t('landing.yourSessions')}
                     </Typography>
                 </Divider>
                 {/* Sort control — placed in the upper-right of the section
@@ -783,18 +783,18 @@ export const DataFormulatorFC = ({ }) => {
                         }}
                         renderValue={(v) => {
                             const labels: Record<typeof wsSort, string> = {
-                                created_desc: 'newest',
-                                created_asc: 'oldest',
-                                updated_desc: 'recently modified',
-                                name_asc: 'name',
+                                created_desc: t('landing.sortNewest'),
+                                created_asc: t('landing.sortOldest'),
+                                updated_desc: t('landing.sortRecentlyModified'),
+                                name_asc: t('landing.sortName'),
                             };
                             return labels[v as typeof wsSort];
                         }}
                     >
-                        <MenuItem value="created_desc" sx={{ fontSize: 12 }}>newest first</MenuItem>
-                        <MenuItem value="created_asc" sx={{ fontSize: 12 }}>oldest first</MenuItem>
-                        <MenuItem value="updated_desc" sx={{ fontSize: 12 }}>recently modified</MenuItem>
-                        <MenuItem value="name_asc" sx={{ fontSize: 12 }}>name (a–z)</MenuItem>
+                        <MenuItem value="created_desc" sx={{ fontSize: 12 }}>{t('landing.sortNewestFirst')}</MenuItem>
+                        <MenuItem value="created_asc" sx={{ fontSize: 12 }}>{t('landing.sortOldestFirst')}</MenuItem>
+                        <MenuItem value="updated_desc" sx={{ fontSize: 12 }}>{t('landing.sortRecentlyModified')}</MenuItem>
+                        <MenuItem value="name_asc" sx={{ fontSize: 12 }}>{t('landing.sortNameAZ')}</MenuItem>
                     </Select>
                 </Box>
                 <Box sx={{
@@ -850,19 +850,19 @@ export const DataFormulatorFC = ({ }) => {
                                 opacity: 0,
                                 transition: 'opacity 0.15s',
                             }}>
-                                <Tooltip title="Rename">
+                                <Tooltip title={t('landing.tooltipRename')}>
                                     <IconButton size="small" sx={{ color: 'text.secondary', backgroundColor: 'rgba(255,255,255,0.85)', '&:hover': { backgroundColor: 'rgba(240,240,240,0.95)' } }}
                                         onClick={(e) => { e.stopPropagation(); startRenameWorkspace(w.id, w.display_name); }}>
                                         <EditOutlinedIcon fontSize="small" />
                                     </IconButton>
                                 </Tooltip>
-                                <Tooltip title="Export">
+                                <Tooltip title={t('landing.tooltipExport')}>
                                     <IconButton size="small" sx={{ color: 'text.secondary', backgroundColor: 'rgba(255,255,255,0.85)', '&:hover': { backgroundColor: 'rgba(240,240,240,0.95)' } }}
                                         onClick={(e) => { e.stopPropagation(); handleExportWorkspace(w.id); }}>
                                         <DownloadIcon fontSize="small" />
                                     </IconButton>
                                 </Tooltip>
-                                <Tooltip title="Delete">
+                                <Tooltip title={t('landing.tooltipDelete')}>
                                     <IconButton size="small" sx={{ color: 'text.secondary', backgroundColor: 'rgba(255,255,255,0.85)', '&:hover': { backgroundColor: 'rgba(240,240,240,0.95)' } }}
                                         onClick={(e) => { e.stopPropagation(); setConfirmDeleteWs(w.id); }}>
                                         <DeleteOutlineIcon fontSize="small" />
@@ -881,24 +881,26 @@ export const DataFormulatorFC = ({ }) => {
                         '&:hover': { transform: 'translateY(-2px)', backgroundColor: 'action.hover' },
                     }}>
                         <UploadFileIcon sx={{ color: 'text.secondary', fontSize: 20 }} />
-                        <Typography variant="caption" color="text.secondary">Import workspace (.zip)</Typography>
+                        <Typography variant="caption" color="text.secondary">{t('landing.importWorkspaceZip')}</Typography>
                         <input type="file" hidden accept=".zip" ref={importRef} onChange={handleImportWorkspace} />
                     </Card>
                 </Box>
             </Box>
             {/* ── Delete workspace confirmation ────────────────────── */}
             <Dialog open={confirmDeleteWs !== null} onClose={() => setConfirmDeleteWs(null)}>
-                <DialogTitle>Delete session?</DialogTitle>
+                <DialogTitle>{t('landing.deleteSessionTitle')}</DialogTitle>
                 <DialogContent>
                     <Typography>
-                        This will permanently delete <strong>{savedWorkspaces.find(w => w.id === confirmDeleteWs)?.display_name || confirmDeleteWs}</strong>{' '}
-                        ({confirmDeleteWs}) and all its data.
+                        {t('landing.deleteSessionDesc', {
+                            name: savedWorkspaces.find(w => w.id === confirmDeleteWs)?.display_name || confirmDeleteWs,
+                            id: confirmDeleteWs,
+                        })}
                     </Typography>
                 </DialogContent>
                 <DialogActions>
-                    <Button onClick={() => setConfirmDeleteWs(null)}>Cancel</Button>
+                    <Button onClick={() => setConfirmDeleteWs(null)}>{t('app.cancel')}</Button>
                     <Button color="error" onClick={() => confirmDeleteWs && handleDeleteWorkspace(confirmDeleteWs)}>
-                        Delete
+                        {t('app.delete')}
                     </Button>
                 </DialogActions>
             </Dialog>
