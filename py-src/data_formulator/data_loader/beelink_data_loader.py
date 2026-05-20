@@ -37,6 +37,7 @@ import requests
 from data_formulator.data_loader.external_data_loader import (
     ExternalDataLoader,
     MAX_IMPORT_ROWS,
+    infer_source_metadata_status,
 )
 
 logger = logging.getLogger(__name__)
@@ -190,12 +191,11 @@ class BeelinkDataLoader(ExternalDataLoader):
 
     @staticmethod
     def catalog_hierarchy() -> list[dict[str, str]]:
-        # beelink 路径深度不固定（mysql_prod.sales.orders 三段；
-        # iceberg_lake.warehouse.fact_x 也可能三/四段）。
-        # POC 阶段统一暴露两层（source + table）：list_tables 只回 name=".".join(path)，
-        # 不带显式 ``path`` 字段——框架的 _tables_to_catalog_tree 会用
-        # ``name.split(".", maxsplit=num_ns)`` 切，把 source 段保住、把内层多段
-        # 整体下沉为 leaf 名，避免显式 path 被框架按 eff_depth 截断时丢掉 source。
+        # beelink 路径深度不固定：普通 source 直挂表（mysql_local.foo 两段），
+        # 外接 SQL 类 source（mysql / tpcds_12domain）含 schema/db/CONTAINER
+        # 层（mysql.dbA.orders 三段；iceberg_lake.warehouse.fact_x 三/四段）。
+        # 这里只声明"source + table"两层占位，真正的多层渲染由
+        # ``_tables_to_catalog_tree`` 覆写按每张表的真实 path 现搭。
         return [
             {"key": "source", "label": "Source"},
             {"key": "table", "label": "Table"},
@@ -334,11 +334,12 @@ class BeelinkDataLoader(ExternalDataLoader):
                     if keyword and keyword not in name.lower():
                         continue
                     tables.append({
-                        # 故意不带 ``path`` 字段：catalog_hierarchy 深度 = 2，
-                        # 框架对 len(path) > eff_depth 会截掉头部段，导致 source 丢失。
-                        # 不传 path 时框架走 name.split(".", maxsplit=num_ns)，
-                        # source 永远保住，内层多段整体下沉为 leaf 名。
                         "name": name,
+                        # 带上完整 beelink path，``_tables_to_catalog_tree``
+                        # 覆写版按其真实深度建多级 namespace；
+                        # ``_source_name = name`` 保证 import / preview / sample
+                        # 走 source_table.split(".") 拼回原始路径，行为不变。
+                        "path": list(cpath),
                         "metadata": {
                             # 行数 / 列信息留给 get_column_types() 在用户点开时补；
                             # 这里只给最便宜的占位，避免对每张表都打一次 schema 请求。
@@ -386,6 +387,95 @@ class BeelinkDataLoader(ExternalDataLoader):
             page_token = (detail or {}).get("nextPageToken")
             if not page_token:
                 return
+
+    # ── Catalog tree ──────────────────────────────────────────
+    #
+    # 覆写框架版以按每张表的真实 beelink path 现搭多级 namespace 节点。
+    # 框架默认实现按 ``catalog_hierarchy`` 静态深度截断 path，会把
+    # ``mysql.dbA.orders`` 这种 3 段路径裁成 ``dbA → orders``，丢掉
+    # ``mysql`` 顶层。此处不依赖固定深度：
+    #
+    # * len(path)=2 (普通 source → 表)：保持 ``source → table`` 两层，
+    #   与历史 test / smartquery_demo / tpcds_sf10 渲染完全一致。
+    # * len(path)≥3 (含 CONTAINER 中间层)：source → schema/db → … → table，
+    #   每段都作为 namespace 节点，让前端可逐层展开。
+    #
+    # 节点字段对齐 ExternalDataLoader._tables_to_catalog_tree：
+    # namespace 携带累计 path 与 children；table 叶携带 _source_name +
+    # source_metadata_status，import / preview 流程零改动。
+
+    def _tables_to_catalog_tree(self, tables: list[dict[str, Any]]) -> list[dict]:
+        from collections import OrderedDict
+
+        root: "OrderedDict[str, dict]" = OrderedDict()
+
+        def _ensure_namespace(cursor: "OrderedDict[str, dict]",
+                              segments: list[str]) -> "OrderedDict[str, dict]":
+            cumulative: list[str] = []
+            for seg in segments:
+                cumulative.append(seg)
+                node = cursor.get(seg)
+                if node is None or node.get("node_type") != "namespace":
+                    node = {
+                        "name": seg,
+                        "node_type": "namespace",
+                        "path": list(cumulative),
+                        "metadata": None,
+                        "children": OrderedDict(),
+                    }
+                    cursor[seg] = node
+                cursor = node["children"]
+            return cursor
+
+        for t in tables:
+            segments = list(t.get("path") or [])
+            if not segments:
+                # 回退：缓存里旧记录无 path 字段时按点分 name 还原
+                raw = (t.get("name") or "").strip()
+                if not raw:
+                    continue
+                segments = raw.split(".")
+
+            orig_name = t.get("name") or ".".join(segments)
+            meta = t.get("metadata")
+            table_key = t.get("table_key")
+            if table_key:
+                meta = {**(meta or {}), "table_key": table_key}
+            merged = {**(meta or {}), "_source_name": orig_name}
+            if "source_metadata_status" not in merged:
+                merged["source_metadata_status"] = infer_source_metadata_status(meta)
+
+            leaf_name = segments[-1]
+            leaf_node = {
+                "name": leaf_name,
+                "node_type": "table",
+                "path": list(segments),
+                "metadata": merged,
+            }
+
+            if len(segments) == 1:
+                root.setdefault(leaf_name, leaf_node)
+                continue
+
+            parent_children = _ensure_namespace(root, segments[:-1])
+            parent_children[leaf_name] = leaf_node
+
+        def _materialize(cursor: "OrderedDict[str, dict]") -> list[dict]:
+            result: list[dict] = []
+            for node in cursor.values():
+                if node.get("node_type") == "namespace":
+                    result.append({
+                        "name": node["name"],
+                        "node_type": "namespace",
+                        "path": node["path"],
+                        "metadata": None,
+                        "children": _materialize(node["children"]),
+                    })
+                else:
+                    result.append(node)
+            return result
+
+        return _materialize(root)
 
     def get_column_types(self, source_table: str) -> dict[str, Any]:
         """取单张表的 schema；返回 ``{"columns": [...], "description": ...}``。
