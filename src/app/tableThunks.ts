@@ -426,16 +426,16 @@ export function buildDictTableFromWorkspace(
  */
 export function hasLocalOnlyAncestor(tableId: string, tables: DictTable[]): boolean {
     const visited = new Set<string>();
-    
+
     const check = (id: string): boolean => {
         if (visited.has(id)) return false;
         visited.add(id);
-        
+
         const t = tables.find(tbl => tbl.id === id);
         if (!t) return false;
         // virtual field indicates data is stored on server; absence means local-only
         if (!t.virtual && !t.derive) return true;
-        
+
         if (t.derive?.source) {
             for (const sourceId of t.derive.source) {
                 if (check(sourceId)) return true;
@@ -443,6 +443,42 @@ export function hasLocalOnlyAncestor(tableId: string, tables: DictTable[]): bool
         }
         return false;
     };
-    
+
     return check(tableId);
 }
+
+/**
+ * ChatBI → DF 原生界面：按名字把 workspace 里已存在的表加入 Redux store。
+ *
+ * 用于 `/?table=<name>` 这条接入路径：/chatbi 完成 query_beelink_sql 后跳主页，
+ * 主页消费 URL 参数把结果表挂进 Data Thread。表已经由后端写入 workspace，
+ * 这里只负责精确匹配 + buildDictTable + addTableToStore（reducer 内部会 setFocused）。
+ *
+ * 已存在则只 setFocused 复用，避免重复添加。找不到 reject 让调用方 warn。
+ */
+export const loadWorkspaceTableByName = createAsyncThunk<
+    DictTable,
+    string,
+    { state: DataFormulatorState }
+>(
+    'dataFormulator/loadWorkspaceTableByName',
+    async (tableName, { dispatch, getState }) => {
+        if (!tableName) {
+            throw new Error('loadWorkspaceTableByName: tableName is required');
+        }
+        const existing = getState().tables.find(t => t.id === tableName);
+        if (existing) {
+            dispatch(dfActions.setFocused({ type: 'table', tableId: existing.id }));
+            return existing;
+        }
+        const { data } = await apiRequest(getUrls().LIST_TABLES, { method: 'GET' });
+        const wsTable = (data?.tables || []).find((t: any) => t.name === tableName);
+        if (!wsTable) {
+            throw new Error(`workspace 中找不到表 "${tableName}"`);
+        }
+        const finalTable = buildDictTableFromWorkspace(wsTable, undefined);
+        dispatch(dfActions.addTableToStore(finalTable));
+        dispatch(fetchFieldSemanticType(finalTable));
+        return finalTable;
+    }
+);

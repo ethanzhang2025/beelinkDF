@@ -480,6 +480,8 @@ _CHATBI_HTML = r"""<!DOCTYPE html>
     sess.content.appendChild(card);
   }
   // 通用：单结果卡（标题 + headline + meta + 表格 + 可选图表 + 可选 SQL 折叠）
+  // opts.openInDfTableName 非空时，在卡片末尾追加"在 DF 原生界面继续分析"按钮，
+  // 链接到 /?table=<encoded>，由 DataFormulator.tsx 消费 URL 参数把表挂进 store。
   function renderResultCard(sess, opts) {
     var card = el('div', {class: 'card'});
     card.appendChild(el('div', {class: 'card-head ok', text: opts.title}));
@@ -511,8 +513,24 @@ _CHATBI_HTML = r"""<!DOCTYPE html>
           text: '仅显示前 ' + tbl.shown + ' / ' + tbl.total + ' 行。'}));
       }
     }
+    if (opts.openInDfTableName) {
+      body.appendChild(renderOpenInDfLink(opts.openInDfTableName, sess.workspace));
+    }
     card.appendChild(body);
     sess.content.appendChild(card);
+  }
+  // ChatBI 结果表 → DF 原生界面：跳 /?ws=<workspace>&table=<encoded>
+  // 同时带 ws 让主页自动切到 chatbi 当前 workspace（默认 default），消费完两个参数都会被清理。
+  function renderOpenInDfLink(tableName, workspace) {
+    var wrap = el('div', {class: 'meta'});
+    var a = el('a', {text: '在 DF 原生界面继续分析'});
+    var ws = workspace || 'default';
+    a.href = '/?ws=' + encodeURIComponent(ws) + '&table=' + encodeURIComponent(tableName);
+    a.style.cssText = 'display:inline-block;margin-top:6px;padding:4px 10px;'
+      + 'border:1px solid #1976d2;border-radius:4px;color:#1976d2;'
+      + 'text-decoration:none;font-size:13px;';
+    wrap.appendChild(a);
+    return wrap;
   }
 
   // ========================================================================
@@ -774,7 +792,8 @@ _CHATBI_HTML = r"""<!DOCTYPE html>
         headline: headlineText,
         meta: '自动选择表：' + sess.source + '.' + table + ' · 共 ' + rows.length + ' 个分组 · 走 /api/connectors/import-sql（不经 DataAgent）',
         sql: sql,
-        columns: cols, rows: rows, limit: 200
+        columns: cols, rows: rows, limit: 200,
+        openInDfTableName: savedName
       });
       sess.hasSuccess = true;
       setStatus(sess, '完成', 'done');
@@ -865,6 +884,7 @@ _CHATBI_HTML = r"""<!DOCTYPE html>
       if (tbl.shown < tbl.total) {
         dataSlot.appendChild(el('div', {class: 'meta', text: '仅显示前 ' + tbl.shown + ' / ' + tbl.total + ' 行。'}));
       }
+      if (parsed.table_name) dataSlot.appendChild(renderOpenInDfLink(parsed.table_name, sess.workspace));
     } catch (e) { dataSlot.textContent = '读取样例行失败：' + String(e && e.message || e); }
   }
   function renderClarify(sess, evt) {

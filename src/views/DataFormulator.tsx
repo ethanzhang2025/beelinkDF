@@ -57,6 +57,7 @@ import { apiRequest } from '../app/apiClient';
 import { listWorkspaces, loadWorkspace, deleteWorkspace, exportWorkspace, importWorkspace, onWorkspaceListChanged, updateWorkspaceMeta } from '../app/workspaceService';
 import type { WorkspaceSummary } from '../app/workspaceService';
 import { AppDispatch } from '../app/store';
+import { loadWorkspaceTableByName } from '../app/tableThunks';
 import { generateUUID } from '../app/identity';
 import Card from '@mui/material/Card';
 import CardContent from '@mui/material/CardContent';
@@ -101,6 +102,59 @@ export const DataFormulatorFC = ({ }) => {
             dispatch(dfActions.setFocused({ type: 'table', tableId: tables[0].id }));
         }
     }, [focusedId, tables, dispatch]);
+
+    // ChatBI → DF 原生：消费 `/?ws=<id>&table=<name>` 把 chatbi 落到 workspace 的结果表挂进 store。
+    // 1) 若 URL 指定 ws 且与 activeWorkspace 不一致：先切到该 workspace（loadWorkspace 拿历史 state，
+    //    没拿到就空 session 化），并清掉 ws 参数。activeWorkspace 改变后 useEffect 重跑；
+    // 2) 等到 ws 对齐 / activeWorkspace 就绪后：dispatch loadWorkspaceTableByName 把表挂进 store；
+    // 3) 用 ref 防同名表重复加载（避免 useEffect 重入）；加载完无论成败 history.replaceState 清 table。
+    const chatbiTableHandledRef = useRef<string | null>(null);
+    useEffect(() => {
+        if (typeof window === 'undefined') return;
+        const params = new URLSearchParams(window.location.search);
+        const wantWs = params.get('ws');
+        const wantName = params.get('table');
+        if (!wantName) return;
+
+        // 第 1 步：workspace 对齐
+        if (wantWs && (!activeWorkspace || activeWorkspace.id !== wantWs)) {
+            (async () => {
+                try {
+                    const result = await loadWorkspace(wantWs);
+                    if (result && Object.keys(result.state).length > 0) {
+                        dispatch(dfActions.loadState({ ...result.state, activeWorkspace: { id: wantWs, displayName: result.displayName } }));
+                    } else {
+                        dispatch(dfActions.setActiveWorkspace({ id: wantWs, displayName: wantWs }));
+                    }
+                } catch (e) {
+                    console.warn('[chatbi] 切换 workspace 失败:', wantWs, e);
+                    dispatch(dfActions.setActiveWorkspace({ id: wantWs, displayName: wantWs }));
+                }
+                const url = new URL(window.location.href);
+                url.searchParams.delete('ws');
+                window.history.replaceState({}, '', url.toString());
+            })();
+            return;
+        }
+
+        // 第 2 步：activeWorkspace 就绪后加载表
+        if (!activeWorkspace) return;
+        if (chatbiTableHandledRef.current === wantName) return;
+        chatbiTableHandledRef.current = wantName;
+
+        const clearTableQuery = () => {
+            const url = new URL(window.location.href);
+            url.searchParams.delete('table');
+            window.history.replaceState({}, '', url.toString());
+        };
+
+        dispatch(loadWorkspaceTableByName(wantName))
+            .unwrap()
+            .catch((err) => {
+                console.warn('[chatbi] 加载结果表失败:', wantName, err);
+            })
+            .finally(clearTableQuery);
+    }, [activeWorkspace, dispatch]);
 
     // ── Connector instances (for landing page menu) ─────────────
     const [pageConnectors, setPageConnectors] = useState<ConnectorInstance[]>([]);
