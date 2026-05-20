@@ -290,7 +290,9 @@ class BeelinkDataLoader(ExternalDataLoader):
     # ── Catalog 浏览 ───────────────────────────────────────────
 
     # list_tables 用到的常量：可展开的容器类型 / 单页 maxChildren
-    _CONTAINER_TYPES = {"SOURCE", "SPACE", "HOME", "FOLDER"}
+    # CONTAINER：beelink 对外接 SQL 数据源（mysql / tpcds_12domain 等）中
+    # schema/db 层的标记；不纳入会让该 source 整棵 DATASET 子树被吞掉。
+    _CONTAINER_TYPES = {"SOURCE", "SPACE", "HOME", "FOLDER", "CONTAINER"}
     _CATALOG_PAGE_SIZE = 1000
 
     def list_tables(self, table_filter: str | None = None) -> list[dict[str, Any]]:
