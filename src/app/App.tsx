@@ -191,40 +191,8 @@ const LANGUAGE_LABELS: Record<string, string> = {
     de: 'DE',
 };
 
-const LanguageSwitcher: React.FC = () => {
-    const { i18n } = useTranslation();
-    const availableLanguages = useSelector(
-        (state: DataFormulatorState) => state.serverConfig.AVAILABLE_LANGUAGES
-    );
-
-    if (!availableLanguages || availableLanguages.length <= 1) return null;
-
-    return (
-        <ToggleButtonGroup
-            value={i18n.language.split('-')[0]}
-            exclusive
-            onChange={(_, value) => value && i18n.changeLanguage(value)}
-            size="small"
-            sx={{ 
-                height: '28px', 
-                my: 'auto',
-                mr: 1,
-                '& .MuiToggleButton-root': {
-                    textTransform: 'none',
-                    fontSize: '12px',
-                    py: 0,
-                    minWidth: '40px',
-                },
-            }}
-        >
-            {availableLanguages.map(lang => (
-                <ToggleButton key={lang} value={lang}>
-                    {LANGUAGE_LABELS[lang] || lang.toUpperCase()}
-                </ToggleButton>
-            ))}
-        </ToggleButtonGroup>
-    );
-};
+// 智能问数：固定中文，不再渲染语言切换。i18n 底座保留以便未来恢复。
+const LanguageSwitcher: React.FC = () => null;
 
 export interface AppFCProps {
 }

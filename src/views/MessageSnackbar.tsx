@@ -39,6 +39,31 @@ const TYPE_COLORS: Record<string, string> = {
     success: '#2e7d32',
 };
 
+// 智能问数：消息显示层最小本地化映射。源头 dispatch 仍可保留英文（不影响 console / 后端日志），
+// 这里只把用户可见的 component / value / detail 中已知英文片段替换成中文。
+// 完整字符串匹配优先；不命中再走子串替换（覆盖类似 "Failed to load: ..." 这类带后缀的情况）。
+const MESSAGE_TRANSLATIONS: Record<string, string> = {
+    'Failed to sample table data': '表数据采样失败',
+    'The selected model does not support image input. Please switch to a vision-capable model or remove the image.': '当前模型不支持图像输入，请切换到支持视觉输入的模型',
+    'The selected model does not support image input. Please switch to a vision-capable model.': '当前模型不支持图像输入，请切换到支持视觉输入的模型',
+    'chart insight': '图表洞察',
+    'chart builder': '图表构建器',
+    'data loader': '数据加载',
+    'data agent': '智能代理',
+    'workspace': '工作区',
+    'model': '模型',
+    'connector': '数据连接',
+};
+const localizeMessage = (s: string | undefined): string => {
+    if (!s) return s || '';
+    if (s in MESSAGE_TRANSLATIONS) return MESSAGE_TRANSLATIONS[s];
+    let out = s;
+    for (const [en, zh] of Object.entries(MESSAGE_TRANSLATIONS)) {
+        if (out.includes(en)) out = out.split(en).join(zh);
+    }
+    return out;
+};
+
 // Helper function to format timestamp
 const formatTimestamp = (timestamp: number) => {
     const timestampMs = timestamp < 1e12 ? timestamp * 1000 : timestamp;
@@ -273,7 +298,7 @@ export const MessageSnackbar = React.memo(function MessageSnackbar() {
                                     <Typography fontSize={10} component="div" sx={{ display: 'flex', alignItems: 'baseline', gap: 0.5 }}>
                                         <span style={{ color, fontWeight: 600 }}>{symbol}</span>
                                         <span style={{ color: '#888' }}>[{formatTimestamp(msg.timestamp)}]</span>
-                                        <span>(<span style={{ color: '#888' }}>{msg.component}</span>) {msg.value}</span>
+                                        <span>(<span style={{ color: '#888' }}>{localizeMessage(msg.component)}</span>) {localizeMessage(msg.value)}</span>
                                         {msg.count > 1 && (
                                             <span style={{ 
                                                 color, fontWeight: 600,
@@ -295,7 +320,7 @@ export const MessageSnackbar = React.memo(function MessageSnackbar() {
                                             {msg.detail && (
                                                 <div style={{ marginBottom: 4 }}>
                                                     <Typography fontSize={10} sx={{ color: '#888' }}>— details —</Typography>
-                                                    <Typography fontSize={10}>{msg.detail}</Typography>
+                                                    <Typography fontSize={10}>{localizeMessage(msg.detail)}</Typography>
                                                 </div>
                                             )}
                                             {msg.code && (
@@ -335,10 +360,10 @@ export const MessageSnackbar = React.memo(function MessageSnackbar() {
             >
                 <Alert onClose={handleClose} severity={latestMessage?.type} sx={{ maxWidth: '400px', maxHeight: '600px', overflow: 'auto' }}>
                     <Typography fontSize={12} component="span" sx={{margin: "auto"}}>
-                        <b>[{formatTimestamp(latestMessage.timestamp)}] ({latestMessage.component})</b> {latestMessage?.value}
-                    </Typography> 
+                        <b>[{formatTimestamp(latestMessage.timestamp)}] ({localizeMessage(latestMessage.component)})</b> {localizeMessage(latestMessage?.value)}
+                    </Typography>
                     {latestMessage?.detail && <>
-                        <div style={{ borderTop: '1px solid #ddd', margin: '4px 0', fontSize: 12 }}>{latestMessage.detail}</div>
+                        <div style={{ borderTop: '1px solid #ddd', margin: '4px 0', fontSize: 12 }}>{localizeMessage(latestMessage.detail)}</div>
                     </>}
                     {latestMessage?.code && 
                         <pre style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontSize: 10, opacity: 0.7, margin: '4px 0' }}>
