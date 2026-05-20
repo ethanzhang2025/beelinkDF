@@ -485,6 +485,77 @@ _CHATBI_HTML = r"""<!DOCTYPE html>
     window.scrollTo(0, document.body.scrollHeight);
   }
 
+  // ---------- 确定性 catalog 短路 ----------
+  // 对"列出库里有哪些表"这类意图，不走 DataAgent 自由 SQL（之前观察到 Agent 会
+  // 错把 schema 当 table_catalog 导致 INFORMATION_SCHEMA 返 0 行）。直接调
+  // /api/connectors/get-catalog-tree 拿确定的真实表清单。
+  var LIST_TABLES_DEFAULTS = {
+    connector_id: 'beelink:beelink-main',
+    source: 'smartquery_demo'
+  };
+  // 极简静态推测字典（用户已确认的 smartquery_demo 6 张表）；查不到给"-"
+  var TABLE_PURPOSE = {
+    customers:    '客户',
+    products:     '商品',
+    categories:   '商品分类',
+    regions:      '地区',
+    channels:     '渠道',
+    sales_orders: '销售订单'
+  };
+  function isListTablesIntent(q) {
+    return /有哪些表|哪些表|列出表|列出.{0,5}表|表清单|有什么表|什么表|当前库.{0,8}表|这个库.{0,8}表|table\s*list|list\s*tables/i.test(q);
+  }
+  async function fetchSourceTables(identity, workspace, connectorId, sourceName) {
+    var resp = await fetch('/api/connectors/get-catalog-tree', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json',
+                 'X-Identity-Id': identity, 'X-Workspace-Id': workspace },
+      body: JSON.stringify({ connector_id: connectorId })
+    });
+    if (!resp.ok) throw new Error('get-catalog-tree HTTP ' + resp.status);
+    var json = await resp.json();
+    var tree = (json && json.data && json.data.tree) || [];
+    for (var i = 0; i < tree.length; i++) {
+      if (tree[i].name === sourceName) {
+        return (tree[i].children || []).map(function (c) { return c.name; });
+      }
+    }
+    return [];
+  }
+  async function runListTablesIntent(sess) {
+    setStatus(sess, '查询 catalog…');
+    try {
+      // DF 重启后 connector 注册表为空，必须先触发 lazy-load 否则 catalog-tree 返 0 表
+      await fetch('/api/connectors', {
+        method: 'GET',
+        headers: { 'X-Identity-Id': sess.identity, 'X-Workspace-Id': sess.workspace }
+      });
+      var tables = await fetchSourceTables(sess.identity, sess.workspace,
+                                           LIST_TABLES_DEFAULTS.connector_id,
+                                           LIST_TABLES_DEFAULTS.source);
+      var card = el('div', {class: 'card'});
+      card.appendChild(el('div', {class: 'card-head ok',
+                                  text: '📚 ' + LIST_TABLES_DEFAULTS.source + ' 表清单'}));
+      var body = el('div', {class: 'card-body'});
+      body.appendChild(el('div', {class: 'headline', text: '共 ' + tables.length + ' 张表'}));
+      body.appendChild(el('div', {class: 'meta',
+        text: '来源 connector ' + LIST_TABLES_DEFAULTS.connector_id +
+              ' · 走 /api/connectors/get-catalog-tree（不经 DataAgent）'}));
+      var rows = tables.map(function (n) {
+        var r = {}; r['表名'] = n; r['推测用途'] = TABLE_PURPOSE[n] || '-'; return r;
+      });
+      var tbl = renderTable(['表名', '推测用途'], rows, {limit: 100});
+      body.appendChild(tbl.table);
+      card.appendChild(body);
+      sess.content.appendChild(card);
+      sess.hasSuccess = true;
+      setStatus(sess, '完成', 'done');
+    } catch (e) {
+      setStatus(sess, '出错', 'fail');
+      renderError(sess, { type: 'error', message: String(e && e.message || e) });
+    }
+  }
+
   function setBusy(busy, msg) {
     submitBtn.disabled = busy;
     statusEl.innerHTML = (busy ? '<span class="spinner"></span>' : '') + (msg || '');
@@ -502,12 +573,20 @@ _CHATBI_HTML = r"""<!DOCTYPE html>
     var question = $('question').value.trim();
 
     if (!identity || !workspace) { alert('请填 X-Identity-Id 与 X-Workspace-Id'); return; }
-    if (!api_key) { alert('请填 api_key（仅浏览器内存）'); return; }
     if (!question) { alert('请填问题'); return; }
 
     debugPreEl.textContent = '';
     setBusy(true, '请求中…');
     var sess = newSession(question, identity, workspace);
+
+    // 意图短路：列表表 → 走确定性 catalog，不调 LLM，无需 api_key
+    if (isListTablesIntent(question)) {
+      await runListTablesIntent(sess);
+      setBusy(false, '完成');
+      return;
+    }
+    // 其他意图仍需 api_key 调 DataAgent
+    if (!api_key) { alert('请填 api_key（仅浏览器内存）'); return; }
 
     // 给 Agent 加"探索约束"前缀，抑制猜未确认表名（不改后端，纯前端 prompt 工程）
     var GUARDRAIL = [
