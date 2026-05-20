@@ -558,7 +558,9 @@ export function useFormulateData() {
             // Delegate chart creation to the caller
             const focusedChartId = createChart({ candidateTable, refinedGoal, currentConcepts });
 
-            if (focusedChartId) {
+            // 仅在 selected model 支持视觉时自动触发图表洞察；deepseek-chat 等纯文本模型跳过，
+            // 避免后端返回 "model does not support image input" 噪音。
+            if (focusedChartId && activeModel?.supports_vision !== false) {
                 dispatch(fetchChartInsight({ chartId: focusedChartId, tableId: candidateTable.id }) as any);
             }
 

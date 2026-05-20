@@ -44,7 +44,7 @@ import ButtonGroup from '@mui/material/ButtonGroup';
 import '../scss/VisualizationView.scss';
 import '../scss/DataView.scss';
 import { useDispatch, useSelector } from 'react-redux';
-import { DataFormulatorState, dfActions, fetchChartInsight } from '../app/dfSlice';
+import { DataFormulatorState, dfActions, dfSelectors, fetchChartInsight } from '../app/dfSlice';
 import { assembleVegaChart, extractFieldsFromEncodingMap, getUrls, prepVisTable, fetchWithIdentity } from '../app/utils';
 import { buildEmbeddedDataForChart } from '../app/restyle';
 import { apiRequest } from '../app/apiClient';
@@ -650,6 +650,13 @@ export const ChartEditorFC: FC<{}> = function ChartEditorFC({}) {
     const insightLoading = chartInsightInProgress.includes(focusedChart.id);
     const currentInsightKey = computeInsightKey(focusedChart);
     const insightFresh = focusedChart.insight?.key === currentInsightKey;
+
+    // 仅当 selected model 显式 supports_vision === false 时禁用 Chart Insight 入口，
+    // 避免调用 /api/agent/chart-insight 后才被后端拒绝（deepseek-chat 等纯文本模型场景）。
+    // 不影响 SQL / 拖拽 / encoding shelf / 普通图表渲染。
+    const activeModel = useSelector(dfSelectors.getActiveModel);
+    const visionDisabled = activeModel?.supports_vision === false;
+    const visionDisabledTip = t('chart.visionRequiredHint', '当前模型不支持图表洞察，请切换到支持视觉输入的模型。');
     
     const actionBtnSx = {
         padding: '4px',
@@ -768,20 +775,25 @@ export const ChartEditorFC: FC<{}> = function ChartEditorFC({}) {
     ) : null;
 
     let insightButton = (!chartUnavailable && focusedChart.chartType !== "Table") ? (
-        <Button key="insight-btn" size="small"
-            sx={toggleBtnSx(bottomTab === 'insight')}
-            startIcon={insightLoading ? <CircularProgress size={12} /> : <InsightIcon sx={{ fontSize: 14 }} />}
-            onClick={() => {
-                setBottomTab(prev => {
-                    if (prev === 'insight') return '';
-                    if (!insightFresh && !insightLoading) {
-                        dispatch(fetchChartInsight({ chartId: focusedChart.id, tableId: table.id }) as any);
-                    }
-                    return 'insight';
-                });
-            }}>
-            {t('chart.insight')}
-        </Button>
+        <Tooltip key="insight-btn-tooltip" title={visionDisabled ? visionDisabledTip : ''}>
+            <span>
+                <Button key="insight-btn" size="small"
+                    disabled={visionDisabled}
+                    sx={toggleBtnSx(bottomTab === 'insight')}
+                    startIcon={insightLoading ? <CircularProgress size={12} /> : <InsightIcon sx={{ fontSize: 14 }} />}
+                    onClick={() => {
+                        setBottomTab(prev => {
+                            if (prev === 'insight') return '';
+                            if (!insightFresh && !insightLoading) {
+                                dispatch(fetchChartInsight({ chartId: focusedChart.id, tableId: table.id }) as any);
+                            }
+                            return 'insight';
+                        });
+                    }}>
+                    {t('chart.insight')}
+                </Button>
+            </span>
+        </Tooltip>
     ) : null;
 
     let chartActionButtons = [
@@ -998,30 +1010,40 @@ export const ChartEditorFC: FC<{}> = function ChartEditorFC({}) {
                                             </Box>
                                         ))}
                                     </Box>
-                                    <Button
-                                        size="small"
-                                        sx={{ mt: 1.5, textTransform: 'none', fontSize: '0.7rem' }}
-                                        onClick={() => {
-                                            dispatch(fetchChartInsight({ chartId: focusedChart.id, tableId: table.id }) as any);
-                                        }}
-                                    >
-                                        {t('chart.regenerate')}
-                                    </Button>
+                                    <Tooltip title={visionDisabled ? visionDisabledTip : ''}>
+                                        <span>
+                                            <Button
+                                                size="small"
+                                                disabled={visionDisabled}
+                                                sx={{ mt: 1.5, textTransform: 'none', fontSize: '0.7rem' }}
+                                                onClick={() => {
+                                                    dispatch(fetchChartInsight({ chartId: focusedChart.id, tableId: table.id }) as any);
+                                                }}
+                                            >
+                                                {t('chart.regenerate')}
+                                            </Button>
+                                        </span>
+                                    </Tooltip>
                                 </Box>
                             ) : (
                                 <Box sx={{ p: 1.5 }}>
                                     <Typography fontSize="small" color="text.secondary">
-                                        {t('chart.noInsightAvailable')}
+                                        {visionDisabled ? visionDisabledTip : t('chart.noInsightAvailable')}
                                     </Typography>
-                                    <Button
-                                        size="small"
-                                        sx={{ mt: 0.5, textTransform: 'none', fontSize: '0.7rem' }}
-                                        onClick={() => {
-                                            dispatch(fetchChartInsight({ chartId: focusedChart.id, tableId: table.id }) as any);
-                                        }}
-                                    >
-                                        {t('chart.generateInsight')}
-                                    </Button>
+                                    <Tooltip title={visionDisabled ? visionDisabledTip : ''}>
+                                        <span>
+                                            <Button
+                                                size="small"
+                                                disabled={visionDisabled}
+                                                sx={{ mt: 0.5, textTransform: 'none', fontSize: '0.7rem' }}
+                                                onClick={() => {
+                                                    dispatch(fetchChartInsight({ chartId: focusedChart.id, tableId: table.id }) as any);
+                                                }}
+                                            >
+                                                {t('chart.generateInsight')}
+                                            </Button>
+                                        </span>
+                                    </Tooltip>
                                 </Box>
                             )}
                         </Box>
