@@ -41,8 +41,6 @@ import { HTML5Backend } from 'react-dnd-html5-backend'
 import { toolName } from '../app/App';
 import { DataThread } from './DataThread';
 
-import dfLogo from '../assets/df-logo.png';
-import exampleImageTable from "../assets/example-image-table.png";
 import { ModelSelectionButton } from './ModelSelectionDialog';
 import { UnifiedDataUploadDialog, UploadTabType, DataLoadMenu, ConnectorInstance } from './UnifiedDataUploadDialog';
 import { ReportView } from './ReportView';
@@ -394,33 +392,8 @@ export const DataFormulatorFC = ({ }) => {
 
     useEffect(() => {
         document.title = toolName;
-        
-        // Preload imported images (public images are preloaded in index.html)
-        const imagesToPreload = [
-            { src: dfLogo, type: 'image/png' },
-            { src: exampleImageTable, type: 'image/png' },
-        ];
-        
-        const preloadLinks: HTMLLinkElement[] = [];
-        imagesToPreload.forEach(({ src, type }) => {
-            // Use link preload for better priority
-            const link = document.createElement('link');
-            link.rel = 'preload';
-            link.as = 'image';
-            link.href = src;
-            link.type = type;
-            document.head.appendChild(link);
-            preloadLinks.push(link);
-        });
-        
-        // Cleanup function to remove preload links when component unmounts
-        return () => {
-            preloadLinks.forEach(link => {
-                if (link.parentNode) {
-                    link.parentNode.removeChild(link);
-                }
-            });
-        };
+        // beelink 产品化外壳已隐藏 dfLogo + example-image-table，
+        // 原主动 <link rel=preload as=image> 注入只是占带宽，已删除。
     }, []);
 
     useEffect(() => {

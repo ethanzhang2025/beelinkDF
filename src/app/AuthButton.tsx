@@ -38,11 +38,25 @@ export const AuthButton: FC = () => {
         let cancelled = false;
         (async () => {
             try {
-                const { getAuthInfo, getUserManager } = await import("./oidcConfig");
-                const info = await getAuthInfo();
+                // 先用普通 fetch 拿 auth/info；action='none' / 'redirect' 不
+                // 触发 oidcConfig 动态 import，避免本地匿名模式拉 70K OIDC chunk。
+                let info: AuthInfo | null = null;
+                try {
+                    const resp = await fetch('/api/auth/info');
+                    if (resp.ok) {
+                        const body = await resp.json();
+                        info = (body?.status === 'success' ? body.data : body) as AuthInfo | null;
+                    }
+                } catch {
+                    info = null;
+                }
                 if (!cancelled) {
                     setAuthInfo(info);
                 }
+                if (!info || info.action === 'none' || info.action === 'redirect') {
+                    return;
+                }
+                const { getUserManager } = await import("./oidcConfig");
                 const manager = await getUserManager();
                 if (!cancelled) {
                     setMgr(manager);

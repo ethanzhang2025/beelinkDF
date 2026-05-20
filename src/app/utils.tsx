@@ -148,6 +148,25 @@ async function getCurrentNamespacedIdentity(): Promise<string> {
 // getAccessToken / getUserManager are imported lazily to avoid circular deps
 // and to keep the module working when oidc-client-ts is not bundled.
 
+// Auth action probe（模块级缓存）：fetchWithIdentity 是 hot path，每次都
+// dynamic import oidcConfig 会让本地匿名模式（auth/info.action === 'none'）
+// 也无谓拉 70K OIDC chunk。先用普通 fetch 看一次 action，只有 frontend /
+// backend / transparent 才真正需要 OIDC 模块，其余直接短路。
+let _authActionPromise: Promise<string | null> | null = null;
+function _probeAuthAction(): Promise<string | null> {
+    if (!_authActionPromise) {
+        _authActionPromise = fetch('/api/auth/info')
+            .then(async r => {
+                if (!r.ok) return null;
+                const body = await r.json().catch(() => null);
+                const data = body?.status === 'success' ? body.data : body;
+                return (data?.action ?? null) as string | null;
+            })
+            .catch(() => null);
+    }
+    return _authActionPromise;
+}
+
 /**
  * Get the active workspace ID from the Redux store.
  * Returns null if no workspace is active.
@@ -188,17 +207,22 @@ async function _doFetch(
 
         // Attach OIDC Bearer token when available (frontend mode only).
         // In backend mode the session cookie handles auth — no Bearer needed.
-        try {
-            const { getAccessToken, isBackendAuth } = await import('./oidcConfig');
-            const backend = await isBackendAuth();
-            if (!backend) {
-                const accessToken = await getAccessToken();
-                if (accessToken) {
-                    headers.set('Authorization', `Bearer ${accessToken}`);
+        // 仅在服务端确实启用 OIDC（action != none/redirect）时才动态 import
+        // oidcConfig；本地匿名模式直接短路，避免每次 API 调用都拉 OIDC chunk。
+        const action = await _probeAuthAction();
+        if (action && action !== 'none' && action !== 'redirect') {
+            try {
+                const { getAccessToken, isBackendAuth } = await import('./oidcConfig');
+                const backend = await isBackendAuth();
+                if (!backend) {
+                    const accessToken = await getAccessToken();
+                    if (accessToken) {
+                        headers.set('Authorization', `Bearer ${accessToken}`);
+                    }
                 }
+            } catch {
+                // oidc-client-ts not available — anonymous mode
             }
-        } catch {
-            // oidc-client-ts not available — anonymous mode
         }
 
         options = { ...options, headers };
@@ -249,15 +273,18 @@ export async function fetchWithIdentity(
     const resp = await _doFetch(url, options);
 
     if (resp.status === 401) {
-        try {
-            const { getUserManager } = await import('./oidcConfig');
-            const mgr = await getUserManager();
-            if (mgr) {
-                await mgr.signinSilent();
-                return _doFetch(url, options);
+        const action = await _probeAuthAction();
+        if (action && action !== 'none' && action !== 'redirect') {
+            try {
+                const { getUserManager } = await import('./oidcConfig');
+                const mgr = await getUserManager();
+                if (mgr) {
+                    await mgr.signinSilent();
+                    return _doFetch(url, options);
+                }
+            } catch {
+                // Silent renew failed or OIDC not available — return original 401
             }
-        } catch {
-            // Silent renew failed or OIDC not available — return original 401
         }
     }
 

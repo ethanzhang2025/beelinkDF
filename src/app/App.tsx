@@ -84,7 +84,6 @@ import { MessageSnackbar } from '../views/MessageSnackbar';
 import { ChartRenderService } from '../views/ChartRenderService';
 import { DictTable } from '../components/ComponentType';
 import { AppDispatch } from './store';
-import dfLogo from '../assets/df-logo.png';
 import { AnvilLoader } from '../components/AnvilLoader';
 import { ModelSelectionButton } from '../views/ModelSelectionDialog';
 import KeyboardArrowDownIcon from '@mui/icons-material/KeyboardArrowDown';
@@ -964,8 +963,19 @@ export const AppFC: FC<AppFCProps> = function AppFC(appProps) {
 
             if (!resolvedIdentity) {
                 try {
-                    const { getAuthInfo, getOidcUser } = await import('./oidcConfig');
-                    const info: AuthInfo | null = await getAuthInfo();
+                    // 先用普通 fetch 拿 /api/auth/info，只有非 none/redirect
+                    // 才真正动态 import oidcConfig（70K + oidc-client-ts 依赖），
+                    // 本地匿名模式由此完全避开 OIDC chunk。
+                    let info: AuthInfo | null = null;
+                    try {
+                        const resp = await fetch('/api/auth/info');
+                        if (resp.ok) {
+                            const body = await resp.json();
+                            info = (body?.status === 'success' ? body.data : body) as AuthInfo | null;
+                        }
+                    } catch {
+                        info = null;
+                    }
 
                     if (info?.action === 'backend') {
                         // Backend OIDC — identity from server session
@@ -982,7 +992,8 @@ export const AppFC: FC<AppFCProps> = function AppFC(appProps) {
                             // fall through to browser identity
                         }
                     } else if (info?.action === 'frontend') {
-                        // OIDC PKCE — check for an existing session
+                        // OIDC PKCE — check for an existing session（仅此分支需 oidcConfig）
+                        const { getOidcUser } = await import('./oidcConfig');
                         const user = await getOidcUser();
                         if (user && !user.expired) {
                             resolvedIdentity = {
@@ -1020,11 +1031,17 @@ export const AppFC: FC<AppFCProps> = function AppFC(appProps) {
 
             dispatch(dfActions.setIdentity(resolvedIdentity));
 
-            try {
-                const { data: refreshedConfig } = await apiRequest(getUrls().APP_CONFIG);
-                dispatch(dfActions.setServerConfig(refreshedConfig));
-            } catch {
-                // App config was already loaded; connector status refresh is best-effort.
+            // local identity 模式下 server config 在 identity 解析前后无差异，
+            // 第二次 /api/app-config 拉取纯属冗余；其他模式（user/browser
+            // OIDC 登录后 connector pinned status 可能变）仍按原 best-effort
+            // 逻辑刷一次。
+            if (resolvedIdentity.type !== 'local') {
+                try {
+                    const { data: refreshedConfig } = await apiRequest(getUrls().APP_CONFIG);
+                    dispatch(dfActions.setServerConfig(refreshedConfig));
+                } catch {
+                    // App config was already loaded; connector status refresh is best-effort.
+                }
             }
 
             // Persist current identity type for next page load
