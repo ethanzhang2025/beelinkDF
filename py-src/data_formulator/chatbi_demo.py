@@ -55,14 +55,23 @@ _CHATBI_HTML = r"""<!DOCTYPE html>
   .qhead .qtext { font-size: 15px; color: #111827; margin-top: 2px; word-break: break-word; }
   .qbody { padding: 12px 14px; }
 
-  /* 进度条 */
-  .progress { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; align-items: center; }
-  .pchip { font-size: 11.5px; padding: 3px 8px; border-radius: 999px;
-           background: #eef2ff; color: #3730a3; border: 1px solid #c7d2fe; }
-  .pchip.beelink { background: #ecfdf5; color: #065f46; border-color: #a7f3d0; }
-  .pchip.explore { background: #fef3c7; color: #92400e; border-color: #fde68a; }
-  .pchip.search  { background: #ede9fe; color: #5b21b6; border-color: #ddd6fe; }
-  .pchip.think   { background: #f3f4f6; color: #374151; border-color: #d1d5db; }
+  /* 状态行：替代过去的多芯片，只显当前阶段 */
+  .statusline { display: flex; align-items: center; gap: 8px; margin-bottom: 10px;
+                font-size: 13px; color: #374151; min-height: 22px; }
+  .statusline .dot { display: inline-block; width: 10px; height: 10px;
+                     border: 2px solid #93c5fd; border-top-color: transparent;
+                     border-radius: 50%; animation: spin .8s linear infinite; }
+  .statusline.done .dot { border: none; background: #16a34a; animation: none; }
+  .statusline.fail .dot { border: none; background: #dc2626; animation: none; }
+
+  /* 主结论 */
+  .headline { font-size: 16px; color: #111827; font-weight: 600;
+              padding: 8px 0 4px; line-height: 1.4; }
+  .meta { color: #6b7280; font-size: 12px; }
+
+  /* 图表卡 */
+  .chartbox { margin-top: 10px; padding-top: 8px; border-top: 1px dashed #e5e7eb; }
+  .chartbox .ctitle { font-size: 13px; font-weight: 600; color: #1f2937; margin: 2px 0 8px; }
 
   /* 结果卡 */
   .card { border: 1px solid #e5e7eb; border-radius: 6px; margin: 10px 0; background: #fafafa; }
@@ -198,15 +207,15 @@ _CHATBI_HTML = r"""<!DOCTYPE html>
   }
   function debugLog(line) { debugPreEl.textContent += line + '\n'; }
 
-  // ---------- 工具元数据 ----------
-  var TOOL_LABEL = {
-    'query_beelink_sql':    {label: '🗄️ beelink 执行 SQL', cls: 'beelink'},
-    'explore':              {label: '🐍 Python 分析',       cls: 'explore'},
-    'search_data_tables':   {label: '🔍 查找数据表',         cls: 'search'},
-    'inspect_source_data':  {label: '🔎 检查数据',           cls: 'search'},
-    'read_catalog_metadata':{label: '📚 读 catalog',         cls: 'search'},
-    'search_knowledge':     {label: '📖 查知识',             cls: 'search'},
-    'read_knowledge':       {label: '📖 读知识',             cls: 'search'}
+  // ---------- 工具 → 状态行文案 ----------
+  var TOOL_STATUS = {
+    'query_beelink_sql':    '正在执行 beelink SQL',
+    'explore':              '正在生成回答',
+    'search_data_tables':   '正在查找数据表',
+    'inspect_source_data':  '正在查找数据表',
+    'read_catalog_metadata':'正在查找数据表',
+    'search_knowledge':     '正在查找数据表',
+    'read_knowledge':       '正在查找数据表'
   };
 
   // ---------- 类型判断 ----------
@@ -236,7 +245,7 @@ _CHATBI_HTML = r"""<!DOCTYPE html>
     return { table: t, shown: shown.length, total: rows.length };
   }
 
-  // ---------- 柱状图（纯 CSS / 不依赖外部库） ----------
+  // ---------- 柱状图（纯 CSS / 不依赖外部库；调用方负责排序） ----------
   function renderBarChart(labels, values, opts) {
     opts = opts || {};
     var max = Math.max.apply(null, values);
@@ -255,8 +264,6 @@ _CHATBI_HTML = r"""<!DOCTYPE html>
       row.appendChild(el('div', {class: 'bar-value', text: String(v)}));
       wrap.appendChild(row);
     });
-    var axis = el('div', {class: 'axis', text: opts.axisLabel || ''});
-    if (opts.axisLabel) wrap.appendChild(axis);
     return wrap;
   }
 
@@ -278,16 +285,35 @@ _CHATBI_HTML = r"""<!DOCTYPE html>
     } catch (e) { return null; }
   }
 
-  // ---------- 自动出图：单分类 + 单数值 → 柱状图；否则只表格 ----------
+  // ---------- 自动出图：单分类 + 单数值 → 柱状图（按数值降序）；否则只表格 ----------
   function maybeChartFromSample(sample) {
     if (!sample || !Array.isArray(sample.sample_rows) || sample.sample_rows.length === 0) return null;
     var cols = (sample.columns || []).map(function (c) { return c.name; });
     if (cols.length !== 2) return null;
-    var labels = sample.sample_rows.map(function (r) { return r[cols[0]]; });
-    var values = sample.sample_rows.map(function (r) { return r[cols[1]]; });
+    var rows = sample.sample_rows.map(function (r) { return [r[cols[0]], r[cols[1]]]; });
+    var values = rows.map(function (p) { return p[1]; });
     if (!isNumericArr(values)) return null;
-    if (labels.length > 30) return null;  // 太多类别就不画了
-    return { labels: labels, values: values, labelCol: cols[0], valueCol: cols[1] };
+    if (rows.length > 30) return null;  // 太多类别就不画了
+    rows.sort(function (a, b) { return b[1] - a[1]; });  // 按 cnt 降序
+    return {
+      labels: rows.map(function (p) { return p[0]; }),
+      values: rows.map(function (p) { return p[1]; }),
+      labelCol: cols[0], valueCol: cols[1]
+    };
+  }
+
+  // ---------- 主结论文案：'女 989 人，男 975 人，未知 36 人。'  ----------
+  function buildHeadline(chartCfg) {
+    var unit = /cnt|count|num|人数|总数|总和/i.test(chartCfg.valueCol) ? ' 人' : '';
+    var parts = chartCfg.labels.map(function (lab, i) {
+      return String(lab) + ' ' + chartCfg.values[i] + unit;
+    });
+    return parts.join('，') + '。';
+  }
+
+  // ---------- 图表标题：'<labelCol> 分布' ----------
+  function chartTitle(chartCfg) {
+    return chartCfg.labelCol + ' 分布（按 ' + chartCfg.valueCol + ' 降序）';
   }
 
   // ---------- 业务卡：query_beelink_sql 成功 ----------
@@ -306,44 +332,64 @@ _CHATBI_HTML = r"""<!DOCTYPE html>
       sess.content.appendChild(card);
       return;
     }
-    var title = reused ? '🗄️ beelink SQL（命中缓存，复用上次结果）' : '🗄️ beelink 执行 SQL · 成功';
+    var title = reused ? '🗄️ beelink SQL · 复用本轮已执行 SQL' : '🗄️ beelink 执行 SQL · 成功';
     card.appendChild(el('div', {class: 'card-head ' + (reused ? 'reused' : 'ok'), text: title}));
     var body = el('div', {class: 'card-body'});
-    body.appendChild(kv([
-      ['表名', parsed.table_name || '(无)'],
-      ['行数', String(parsed.row_count == null ? '-' : parsed.row_count)],
-      ['列', (parsed.columns || []).map(function (c) { return c.name + (c.dtype ? ' (' + c.dtype + ')' : ''); }).join(', ') || '(无)']
-    ]));
+
+    // 主结论占位（拿到 sample 后填）
+    var headlineSlot = el('div', {class: 'headline', text: ''});
+    body.appendChild(headlineSlot);
+
+    // 元信息（小字）
+    body.appendChild(el('div', {class: 'meta',
+      text: '表名 ' + (parsed.table_name || '(无)') + ' · 行数 ' + (parsed.row_count == null ? '-' : parsed.row_count)}));
+
+    // SQL 折叠（默认关）
     if (parsed.sql || parsed.source_query) {
       var det = el('details');
-      det.appendChild(el('summary', {text: '查看 SQL'}));
+      det.appendChild(el('summary', {text: '查看执行 SQL'}));
       det.appendChild(el('pre', {class: 'code', text: parsed.sql || parsed.source_query}));
       body.appendChild(det);
     }
-    // 占位行：稍后异步填数据
-    var sampleSlot = el('div', {class: 'muted', text: '正在读取样例行…'});
-    body.appendChild(sampleSlot);
+
+    // 表 / 图占位
+    var dataSlot = el('div', {class: 'muted', text: '正在读取样例行…'});
+    body.appendChild(dataSlot);
     card.appendChild(body);
     sess.content.appendChild(card);
 
     // 异步抓 sample_rows
     var sample = await fetchSampleRows(sess.identity, sess.workspace, parsed.table_name);
-    sampleSlot.innerHTML = '';
+    dataSlot.innerHTML = '';
     if (!sample || !Array.isArray(sample.sample_rows) || sample.sample_rows.length === 0) {
-      sampleSlot.textContent = '未能读取样例行，可到 workspace 查看表「' + parsed.table_name + '」。';
+      dataSlot.textContent = '未能读取样例行，可到 workspace 查看表「' + parsed.table_name + '」。';
       return;
     }
-    var cols = (sample.columns || []).map(function (c) { return c.name; });
-    var tbl = renderTable(cols, sample.sample_rows, {limit: 50});
-    sampleSlot.appendChild(tbl.table);
-    if (tbl.shown < tbl.total) {
-      sampleSlot.appendChild(el('div', {class: 'muted', text: '仅显示前 ' + tbl.shown + ' / ' + tbl.total + ' 行。'}));
-    }
+
     var chartCfg = maybeChartFromSample(sample);
     if (chartCfg) {
-      sampleSlot.appendChild(el('div', {class: 'muted', text: '简单柱状图（' + chartCfg.labelCol + ' × ' + chartCfg.valueCol + '）'}));
-      sampleSlot.appendChild(renderBarChart(chartCfg.labels, chartCfg.values));
+      // 主结论 + 图表 + 表格
+      headlineSlot.textContent = buildHeadline(chartCfg);
+      var chartBox = el('div', {class: 'chartbox'});
+      chartBox.appendChild(el('div', {class: 'ctitle', text: chartTitle(chartCfg)}));
+      chartBox.appendChild(renderBarChart(chartCfg.labels, chartCfg.values));
+      dataSlot.appendChild(chartBox);
     }
+    // 表格（仍展示，业务方可对照原始行）
+    var cols = (sample.columns || []).map(function (c) { return c.name; });
+    var sortedRows = sample.sample_rows.slice();
+    if (chartCfg) {
+      // 表格也按降序对齐图表
+      sortedRows.sort(function (a, b) { return b[chartCfg.valueCol] - a[chartCfg.valueCol]; });
+    }
+    var tbl = renderTable(cols, sortedRows, {limit: 50});
+    var tableBox = el('div');
+    tableBox.appendChild(el('div', {class: 'meta', text: '明细表'}));
+    tableBox.appendChild(tbl.table);
+    if (tbl.shown < tbl.total) {
+      tableBox.appendChild(el('div', {class: 'muted', text: '仅显示前 ' + tbl.shown + ' / ' + tbl.total + ' 行。'}));
+    }
+    dataSlot.appendChild(tableBox);
   }
 
   // ---------- 业务卡：clarify / completion / error ----------
@@ -367,8 +413,10 @@ _CHATBI_HTML = r"""<!DOCTYPE html>
     var c = evt.content;
     var text = '';
     if (typeof c === 'string') text = c;
-    else if (c && typeof c === 'object') text = c.thought || c.answer || c.summary || JSON.stringify(c);
-    body.appendChild(el('div', {text: text || '(无文本回答)'}));
+    else if (c && typeof c === 'object') text = c.thought || c.answer || c.summary || '';
+    // 防御：极少数情况下 content 是 prompt 级长 object，截到 1000 字符避免铺屏
+    if (text.length > 1000) text = text.slice(0, 1000) + '…（已截断，完整内容见调试详情）';
+    body.appendChild(el('div', {text: text || '(无文本回答，详见调试详情)'}));
     card.appendChild(body);
     sess.content.appendChild(card);
   }
@@ -382,27 +430,12 @@ _CHATBI_HTML = r"""<!DOCTYPE html>
     sess.content.appendChild(card);
   }
 
-  // ---------- 进度芯片 ----------
-  function bumpProgress(sess, tool) {
-    sess.counts[tool] = (sess.counts[tool] || 0) + 1;
-    var existing = sess.progress.querySelector('[data-tool="' + tool + '"]');
-    var meta = TOOL_LABEL[tool] || {label: '🔧 ' + tool, cls: ''};
-    if (existing) { existing.textContent = meta.label + ' ×' + sess.counts[tool]; return; }
-    var chip = el('span', {class: 'pchip ' + meta.cls});
-    chip.dataset.tool = tool;
-    chip.textContent = meta.label + ' ×' + sess.counts[tool];
-    sess.progress.appendChild(chip);
-  }
-
-  function bumpThinking(sess) {
-    sess.thinkingCount = (sess.thinkingCount || 0) + 1;
-    var existing = sess.progress.querySelector('[data-tool="__thinking__"]');
-    var label = '💭 Agent 正在分析 ×' + sess.thinkingCount;
-    if (existing) { existing.textContent = label; return; }
-    var chip = el('span', {class: 'pchip think'});
-    chip.dataset.tool = '__thinking__';
-    chip.textContent = label;
-    sess.progress.appendChild(chip);
+  // ---------- 状态行 ----------
+  function setStatus(sess, text, kind) {
+    sess.statusText.textContent = text;
+    sess.status.classList.remove('done', 'fail');
+    if (kind === 'done') sess.status.classList.add('done');
+    else if (kind === 'fail') sess.status.classList.add('fail');
   }
 
   // ---------- 会话 ----------
@@ -413,34 +446,37 @@ _CHATBI_HTML = r"""<!DOCTYPE html>
     head.appendChild(el('div', {class: 'qtext', text: question}));
     card.appendChild(head);
     var body = el('div', {class: 'qbody'});
-    var progress = el('div', {class: 'progress'});
-    body.appendChild(progress);
+    var status = el('div', {class: 'statusline'});
+    status.appendChild(el('span', {class: 'dot'}));
+    var statusText = el('span', {text: '准备中…'});
+    status.appendChild(statusText);
+    body.appendChild(status);
     var content = el('div', {class: 'qcontent'});
     body.appendChild(content);
     card.appendChild(body);
     stageEl.appendChild(card);
-    return { card: card, body: body, progress: progress, content: content,
-             counts: {}, thinkingCount: 0,
-             identity: identity, workspace: workspace };
+    return { card: card, body: body, status: status, statusText: statusText,
+             content: content, identity: identity, workspace: workspace };
   }
 
   // ---------- 事件分发 ----------
   async function handleEvent(sess, evt) {
     var t = evt.type;
     if (t === 'thinking_text') {
-      bumpThinking(sess);
-      // thinking 原文进调试区，不进主区
+      setStatus(sess, 'Agent 正在分析');
       if (evt.content) debugLog('  [thinking] ' + String(evt.content).slice(0, 400));
     } else if (t === 'tool_start') {
-      bumpProgress(sess, evt.tool || 'unknown');
+      setStatus(sess, TOOL_STATUS[evt.tool] || ('正在执行 ' + (evt.tool || '工具')));
     } else if (t === 'tool_result') {
       if (evt.tool === 'query_beelink_sql') await renderBeelinkResult(sess, evt);
-      // 其他 tool 默认不进主区，仅进度芯片 + 调试区
     } else if (t === 'clarify') {
+      setStatus(sess, '需要澄清', 'done');
       renderClarify(sess, evt);
     } else if (t === 'completion' || t === 'result') {
+      setStatus(sess, '完成', 'done');
       renderCompletion(sess, evt);
     } else if (t === 'error') {
+      setStatus(sess, '出错', 'fail');
       renderError(sess, evt);
     }
     window.scrollTo(0, document.body.scrollHeight);
