@@ -332,6 +332,7 @@ _CHATBI_HTML = r"""<!DOCTYPE html>
       sess.content.appendChild(card);
       return;
     }
+    sess.hasSuccess = true;  // 已取到 ok 结果：之后任何 clarify/action 都不进主区
     var title = reused ? '🗄️ beelink SQL · 复用本轮已执行 SQL' : '🗄️ beelink 执行 SQL · 成功';
     card.appendChild(el('div', {class: 'card-head ' + (reused ? 'reused' : 'ok'), text: title}));
     var body = el('div', {class: 'card-body'});
@@ -456,7 +457,8 @@ _CHATBI_HTML = r"""<!DOCTYPE html>
     card.appendChild(body);
     stageEl.appendChild(card);
     return { card: card, body: body, status: status, statusText: statusText,
-             content: content, identity: identity, workspace: workspace };
+             content: content, identity: identity, workspace: workspace,
+             hasSuccess: false };
   }
 
   // ---------- 事件分发 ----------
@@ -470,8 +472,12 @@ _CHATBI_HTML = r"""<!DOCTYPE html>
     } else if (t === 'tool_result') {
       if (evt.tool === 'query_beelink_sql') await renderBeelinkResult(sess, evt);
     } else if (t === 'clarify') {
-      setStatus(sess, '需要澄清', 'done');
-      renderClarify(sess, evt);
+      // 本轮已有成功结果时，澄清/动作不再误导业务方 → 只入调试，主状态保持"完成"
+      if (sess.hasSuccess) { setStatus(sess, '完成', 'done'); }
+      else { setStatus(sess, '需要澄清', 'done'); renderClarify(sess, evt); }
+    } else if (t === 'action') {
+      // 同 clarify：已成功就不在主区追加动作卡
+      if (!sess.hasSuccess) { setStatus(sess, '需要操作', 'done'); }
     } else if (t === 'completion' || t === 'result') {
       setStatus(sess, '完成', 'done');
       renderCompletion(sess, evt);
