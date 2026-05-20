@@ -3,16 +3,16 @@
 最小 ChatBI 演示入口（POC 阶段，非产品化）。
 
 定位：
-- 提供一个独立 HTML 页面 GET /chatbi，纯原生 fetch + NDJSON 流读取，
-  零 npm / 零 vite build，便于直接演示 DataAgent + query_beelink_sql 链路。
-- 不进入 DF React 体系，不读 UI store；表单字段由演示者临时填入（api_key 仅
-  存在于浏览器内存），与 curl 路径完全等价。
+- GET /chatbi 返回单页 HTML，纯原生 fetch + NDJSON 流读取，零 npm / 零 vite build。
+- 演示 DataAgent + query_beelink_sql 链路给业务方看。
 
-WP-A 升级：把 NDJSON 流加工成业务方能看懂的卡片视图
-- 顶部"问答区"：用户问题 + 进度时间线 + 关键产出卡（query_beelink_sql / explore / clarify / completion）
-- 底部"调试区"：原始事件 JSON，默认折叠
+WP-A v2：业务方可读视图
+- 主区域只显：用户问题 / 进度芯片 / SQL（折叠）/ 表名 / 行数 / 表格 / 最小柱状图 / 最终回答
+- 表格与柱状图来自 GET /api/tables/list-tables 的 sample_rows（同 DF UI 数据源）
+- thinking_text 只计数不展示原文；tool_start.code/SYSTEM_PROMPT 等大文本不进主区
+- 原始 NDJSON 全量放底部"调试详情"，默认折叠
 
-不包含：会话历史持久化 / 图表渲染 / BO / RAG / 修复 Agent / SQL Guard。
+不包含：会话历史持久化 / 复杂图表 / BO / RAG / 修复 Agent / SQL Guard。
 """
 from __future__ import annotations
 
@@ -22,8 +22,6 @@ from flask import Blueprint, Response
 chatbi_bp = Blueprint("chatbi", __name__)
 
 
-# 单页 HTML：刻意保留在一个文件里，避免新增模板/静态资源目录。
-# 仅依赖浏览器原生 fetch + ReadableStream，不引入任何外部脚本。
 _CHATBI_HTML = r"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -36,7 +34,6 @@ _CHATBI_HTML = r"""<!DOCTYPE html>
          max-width: 1080px; margin: 16px auto; padding: 0 16px; line-height: 1.5; color: #1f2937; }
   h1 { font-size: 18px; margin: 0 0 4px; }
   .sub { color: #6b7280; font-size: 13px; margin-bottom: 12px; }
-  details > summary { cursor: pointer; user-select: none; }
 
   /* 表单 */
   fieldset { border: 1px solid #d1d5db; border-radius: 6px; padding: 10px 14px; margin-bottom: 10px; }
@@ -52,51 +49,60 @@ _CHATBI_HTML = r"""<!DOCTYPE html>
 
   /* 演示区 */
   #stage { margin-top: 14px; }
-  .qcard { border: 1px solid #d1d5db; border-radius: 8px; margin-bottom: 14px;
-           background: #fff; overflow: hidden; }
+  .qcard { border: 1px solid #d1d5db; border-radius: 8px; margin-bottom: 14px; background: #fff; overflow: hidden; }
   .qhead { padding: 10px 14px; background: #f9fafb; border-bottom: 1px solid #e5e7eb; }
   .qhead .qlabel { font-size: 11px; color: #6b7280; text-transform: uppercase; letter-spacing: .5px; }
   .qhead .qtext { font-size: 15px; color: #111827; margin-top: 2px; word-break: break-word; }
-  .qbody { padding: 10px 14px; }
+  .qbody { padding: 12px 14px; }
 
   /* 进度条 */
-  .progress { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+  .progress { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; align-items: center; }
   .pchip { font-size: 11.5px; padding: 3px 8px; border-radius: 999px;
            background: #eef2ff; color: #3730a3; border: 1px solid #c7d2fe; }
   .pchip.beelink { background: #ecfdf5; color: #065f46; border-color: #a7f3d0; }
   .pchip.explore { background: #fef3c7; color: #92400e; border-color: #fde68a; }
   .pchip.search  { background: #ede9fe; color: #5b21b6; border-color: #ddd6fe; }
-  .pchip.inspect { background: #e0f2fe; color: #075985; border-color: #bae6fd; }
   .pchip.think   { background: #f3f4f6; color: #374151; border-color: #d1d5db; }
 
   /* 结果卡 */
-  .card { border: 1px solid #e5e7eb; border-radius: 6px; margin: 8px 0; background: #fafafa; }
-  .card-head { padding: 6px 10px; font-size: 13px; font-weight: 600; border-bottom: 1px solid #e5e7eb; }
-  .card-head.ok { background: #ecfdf5; color: #065f46; }
-  .card-head.reused { background: #f0f9ff; color: #075985; }
-  .card-head.err { background: #fef2f2; color: #991b1b; }
+  .card { border: 1px solid #e5e7eb; border-radius: 6px; margin: 10px 0; background: #fafafa; }
+  .card-head { padding: 7px 10px; font-size: 13px; font-weight: 600; border-bottom: 1px solid #e5e7eb; }
+  .card-head.ok      { background: #ecfdf5; color: #065f46; }
+  .card-head.reused  { background: #f0f9ff; color: #075985; }
+  .card-head.err     { background: #fef2f2; color: #991b1b; }
   .card-head.clarify { background: #fff7ed; color: #9a3412; }
-  .card-head.final { background: #eef2ff; color: #3730a3; }
-  .card-body { padding: 8px 10px; font-size: 13px; }
-  .kv { display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; font-size: 12.5px; }
+  .card-head.final   { background: #eef2ff; color: #3730a3; }
+  .card-body { padding: 10px 12px; font-size: 13px; }
+  .kv { display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; font-size: 12.5px; margin: 0; }
   .kv dt { color: #6b7280; }
   .kv dd { margin: 0; word-break: break-all; }
   pre.code { background: #1e293b; color: #e2e8f0; border-radius: 4px;
              padding: 8px 10px; font-size: 12px; overflow: auto; max-height: 220px;
              font-family: ui-monospace, "JetBrains Mono", Menlo, monospace; margin: 6px 0; }
-  pre.txt { background: #f8fafc; color: #1f2937; border: 1px solid #e2e8f0;
-            border-radius: 4px; padding: 8px 10px; font-size: 12px; overflow: auto;
-            max-height: 220px; font-family: ui-monospace, Menlo, monospace; margin: 6px 0; white-space: pre; }
-  table.preview { border-collapse: collapse; font-size: 12.5px; margin-top: 6px; }
-  table.preview th, table.preview td { border: 1px solid #d1d5db; padding: 3px 8px; text-align: left; }
-  table.preview th { background: #f3f4f6; }
   .muted { color: #6b7280; font-size: 12px; }
 
+  /* 数据表格 */
+  table.data { border-collapse: collapse; font-size: 12.5px; margin-top: 8px; min-width: 320px; }
+  table.data th, table.data td { border: 1px solid #d1d5db; padding: 4px 10px; text-align: left; vertical-align: top; }
+  table.data th { background: #f3f4f6; }
+  table.data td.num { text-align: right; font-variant-numeric: tabular-nums; }
+
+  /* 简单柱状图（CSS bar） */
+  .barchart { margin-top: 12px; max-width: 560px; }
+  .barchart .bar-row { display: grid; grid-template-columns: 110px 1fr 64px; gap: 8px;
+                       align-items: center; margin: 4px 0; font-size: 12.5px; }
+  .barchart .bar-label { color: #374151; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .barchart .bar-track { background: #f3f4f6; border-radius: 3px; height: 14px; position: relative; }
+  .barchart .bar-fill { background: #2563eb; height: 100%; border-radius: 3px; }
+  .barchart .bar-value { color: #1f2937; font-variant-numeric: tabular-nums; text-align: right; }
+  .barchart .axis { font-size: 11px; color: #6b7280; margin-top: 6px; }
+
   /* 调试区 */
-  #raw { margin-top: 12px; border: 1px dashed #cbd5e1; border-radius: 6px; padding: 8px 12px;
-         background: #fafafa; font-size: 12px; }
-  #raw pre { font-family: ui-monospace, Menlo, monospace; font-size: 11.5px;
-             white-space: pre-wrap; max-height: 360px; overflow: auto; margin: 6px 0 0; }
+  details > summary { cursor: pointer; user-select: none; }
+  #debug { margin-top: 12px; border: 1px dashed #cbd5e1; border-radius: 6px;
+           padding: 8px 12px; background: #fafafa; font-size: 12px; }
+  #debug pre { font-family: ui-monospace, Menlo, monospace; font-size: 11px;
+               white-space: pre-wrap; max-height: 360px; overflow: auto; margin: 6px 0 0; }
 
   #status { color: #6b7280; font-size: 12.5px; margin-left: 10px; }
   .spinner { display: inline-block; width: 10px; height: 10px; border: 2px solid #93c5fd;
@@ -107,10 +113,7 @@ _CHATBI_HTML = r"""<!DOCTYPE html>
 </head>
 <body>
   <h1>beelink ChatBI 演示 (POC)</h1>
-  <div class="sub">
-    复用 <code>/api/agent/data-agent-streaming</code> + DataAgent 第 8 个 tool <code>query_beelink_sql</code>。
-    api_key 仅存浏览器内存；刷新即丢。
-  </div>
+  <div class="sub">DataAgent + <code>query_beelink_sql</code> 智能问数演示。api_key 仅存浏览器内存，刷新即丢。</div>
 
   <form id="form">
     <fieldset>
@@ -128,9 +131,9 @@ _CHATBI_HTML = r"""<!DOCTYPE html>
         <label>model
           <select id="model">
             <option value="deepseek-chat" selected>deepseek-chat（推荐）</option>
-            <option value="deepseek-v4-pro">deepseek-v4-pro（不推荐，thinking 与 DataAgent loop 不兼容）</option>
-            <option value="deepseek-v4-flash">deepseek-v4-flash（不推荐，同上）</option>
-            <option value="deepseek-reasoner">deepseek-reasoner（不推荐，同上）</option>
+            <option value="deepseek-v4-pro">deepseek-v4-pro（不推荐）</option>
+            <option value="deepseek-v4-flash">deepseek-v4-flash（不推荐）</option>
+            <option value="deepseek-reasoner">deepseek-reasoner（不推荐）</option>
           </select>
         </label>
         <label>api_base <input id="api_base" value="https://api.deepseek.com"></label>
@@ -140,9 +143,7 @@ _CHATBI_HTML = r"""<!DOCTYPE html>
           <input id="api_key" type="password" autocomplete="off" placeholder="sk-...">
         </label>
       </div>
-      <div class="warn" id="model_warn" style="display:none">
-        ⚠️ thinking 模式与 DataAgent 主循环不兼容，通常报 400。
-      </div>
+      <div class="warn" id="model_warn" style="display:none">⚠️ thinking 模式与 DataAgent loop 不兼容，通常报 400。</div>
     </fieldset>
 
     <fieldset>
@@ -156,28 +157,26 @@ _CHATBI_HTML = r"""<!DOCTYPE html>
 
   <div id="stage"></div>
 
-  <details id="raw">
-    <summary>原始事件 JSON（调试用，默认折叠）</summary>
-    <pre id="rawpre"></pre>
+  <details id="debug">
+    <summary>调试详情（thinking_text / 原始事件 JSON）</summary>
+    <pre id="debugpre"></pre>
   </details>
 
 <script>
 (function () {
   var $ = function (id) { return document.getElementById(id); };
   var stageEl = $('stage');
-  var rawPreEl = $('rawpre');
+  var debugPreEl = $('debugpre');
   var modelEl = $('model');
   var warnEl = $('model_warn');
   var statusEl = $('status');
   var submitBtn = $('submit');
 
-  function updateWarn() {
+  modelEl.addEventListener('change', function () {
     warnEl.style.display = modelEl.value === 'deepseek-chat' ? 'none' : 'block';
-  }
-  modelEl.addEventListener('change', updateWarn);
-  updateWarn();
+  });
 
-  // ---------- 工具：DOM 帮手 ----------
+  // ---------- DOM helper ----------
   function el(tag, opts) {
     var n = document.createElement(tag);
     if (opts) {
@@ -197,140 +196,165 @@ _CHATBI_HTML = r"""<!DOCTYPE html>
     });
     return dl;
   }
+  function debugLog(line) { debugPreEl.textContent += line + '\n'; }
 
-  // ---------- 工具：解析 query_beelink_sql 的 stdout JSON ----------
-  function parseBeelinkStdout(stdout) {
-    try { return typeof stdout === 'string' ? JSON.parse(stdout) : stdout; }
-    catch (e) { return null; }
-  }
+  // ---------- 工具元数据 ----------
+  var TOOL_LABEL = {
+    'query_beelink_sql':    {label: '🗄️ beelink 执行 SQL', cls: 'beelink'},
+    'explore':              {label: '🐍 Python 分析',       cls: 'explore'},
+    'search_data_tables':   {label: '🔍 查找数据表',         cls: 'search'},
+    'inspect_source_data':  {label: '🔎 检查数据',           cls: 'search'},
+    'read_catalog_metadata':{label: '📚 读 catalog',         cls: 'search'},
+    'search_knowledge':     {label: '📖 查知识',             cls: 'search'},
+    'read_knowledge':       {label: '📖 读知识',             cls: 'search'}
+  };
 
-  // ---------- 工具：把 DataFrame print 文本尝试解析成 [[...], [...]] ----------
-  // pandas 默认 print 形如 "  gender  customer_count\n0      女             989\n..."
-  // 兼容失败时返回 null（不强解析）
-  function tryParseDataFrameText(text) {
-    if (!text || typeof text !== 'string') return null;
-    var lines = text.replace(/\s+$/, '').split('\n').filter(function (l) { return l.length; });
-    if (lines.length < 2 || lines.length > 200) return null;
-    // 列名行：去 index 列，按 2+ 空格切
-    var hdr = lines[0].trim().split(/\s{2,}/);
-    if (hdr.length < 1 || hdr.length > 12) return null;
-    var rows = [];
-    for (var i = 1; i < lines.length; i++) {
-      var parts = lines[i].trim().split(/\s{2,}/);
-      // pandas 行首是 index，丢掉
-      if (parts.length === hdr.length + 1) parts.shift();
-      if (parts.length !== hdr.length) return null;
-      rows.push(parts);
-    }
-    return { columns: hdr, rows: rows };
-  }
+  // ---------- 类型判断 ----------
+  function isNumber(v) { return typeof v === 'number' && isFinite(v); }
+  function isNumericArr(arr) { return arr.length > 0 && arr.every(isNumber); }
 
-  function renderTable(parsed) {
-    var t = el('table', {class: 'preview'});
+  // ---------- 表格 ----------
+  function renderTable(columns, rows, opts) {
+    opts = opts || {};
+    var t = el('table', {class: 'data'});
     var thead = el('thead'), trh = el('tr');
-    parsed.columns.forEach(function (c) { trh.appendChild(el('th', {text: c})); });
+    columns.forEach(function (c) { trh.appendChild(el('th', {text: c})); });
     thead.appendChild(trh); t.appendChild(thead);
     var tbody = el('tbody');
-    parsed.rows.slice(0, 50).forEach(function (r) {
+    var shown = rows.slice(0, opts.limit || 50);
+    shown.forEach(function (r) {
       var tr = el('tr');
-      r.forEach(function (v) { tr.appendChild(el('td', {text: v})); });
+      columns.forEach(function (c) {
+        var v = r[c];
+        var td = el('td', {text: v == null ? '' : String(v)});
+        if (isNumber(v)) td.className = 'num';
+        tr.appendChild(td);
+      });
       tbody.appendChild(tr);
     });
     t.appendChild(tbody);
-    return t;
+    return { table: t, shown: shown.length, total: rows.length };
   }
 
-  // ---------- 进度芯片 ----------
-  var TOOL_LABEL = {
-    'query_beelink_sql': {label: '🗄️ beelink 执行 SQL', cls: 'beelink'},
-    'explore':           {label: '🐍 Python 分析',       cls: 'explore'},
-    'search_data_tables':{label: '🔍 查找数据表',         cls: 'search'},
-    'inspect_source_data':{label:'🔎 检查数据',           cls: 'inspect'},
-    'read_catalog_metadata':{label:'📚 读 catalog',       cls: 'inspect'},
-    'search_knowledge':  {label: '📖 查知识',             cls: 'search'},
-    'read_knowledge':    {label: '📖 读知识',             cls: 'search'}
-  };
-
-  // ---------- 会话状态机 ----------
-  function newSession(question) {
-    var card = el('div', {class: 'qcard'});
-    var head = el('div', {class: 'qhead'});
-    head.appendChild(el('div', {class: 'qlabel', text: 'YOU ASKED'}));
-    head.appendChild(el('div', {class: 'qtext', text: question}));
-    card.appendChild(head);
-    var body = el('div', {class: 'qbody'});
-    var progress = el('div', {class: 'progress'});
-    body.appendChild(progress);
-    var content = el('div', {class: 'qcontent'});
-    body.appendChild(content);
-    card.appendChild(body);
-    stageEl.appendChild(card);
-    return { card: card, body: body, progress: progress, content: content,
-             counts: {}, lastExploreStdout: null, finalized: false };
+  // ---------- 柱状图（纯 CSS / 不依赖外部库） ----------
+  function renderBarChart(labels, values, opts) {
+    opts = opts || {};
+    var max = Math.max.apply(null, values);
+    if (!isFinite(max) || max <= 0) max = 1;
+    var wrap = el('div', {class: 'barchart'});
+    labels.forEach(function (lab, i) {
+      var v = values[i];
+      var pct = Math.max(0, Math.min(100, (v / max) * 100));
+      var row = el('div', {class: 'bar-row'});
+      row.appendChild(el('div', {class: 'bar-label', text: String(lab)}));
+      var track = el('div', {class: 'bar-track'});
+      var fill = el('div', {class: 'bar-fill'});
+      fill.style.width = pct.toFixed(1) + '%';
+      track.appendChild(fill);
+      row.appendChild(track);
+      row.appendChild(el('div', {class: 'bar-value', text: String(v)}));
+      wrap.appendChild(row);
+    });
+    var axis = el('div', {class: 'axis', text: opts.axisLabel || ''});
+    if (opts.axisLabel) wrap.appendChild(axis);
+    return wrap;
   }
 
-  function bumpProgress(sess, tool) {
-    sess.counts[tool] = (sess.counts[tool] || 0) + 1;
-    var existing = sess.progress.querySelector('[data-tool="' + tool + '"]');
-    var meta = TOOL_LABEL[tool] || {label: '🔧 ' + tool, cls: ''};
-    if (!existing) {
-      var chip = el('span', {class: 'pchip ' + meta.cls});
-      chip.dataset.tool = tool;
-      chip.textContent = meta.label + ' ×' + sess.counts[tool];
-      sess.progress.appendChild(chip);
-    } else {
-      existing.textContent = meta.label + ' ×' + sess.counts[tool];
-    }
+  // ---------- 抓样例行 ----------
+  // 复用 DF 自身 /api/tables/list-tables，确保数据与 DF UI 一致
+  async function fetchSampleRows(identity, workspace, tableName) {
+    try {
+      var resp = await fetch('/api/tables/list-tables', {
+        method: 'GET',
+        headers: { 'X-Identity-Id': identity, 'X-Workspace-Id': workspace }
+      });
+      if (!resp.ok) return null;
+      var json = await resp.json();
+      var tables = (json && json.data && json.data.tables) || [];
+      for (var i = 0; i < tables.length; i++) {
+        if (tables[i].name === tableName) return tables[i];
+      }
+      return null;
+    } catch (e) { return null; }
   }
 
-  // ---------- 关键产出卡 ----------
-  function renderBeelinkResult(sess, evt) {
-    var parsed = parseBeelinkStdout(evt.stdout);
+  // ---------- 自动出图：单分类 + 单数值 → 柱状图；否则只表格 ----------
+  function maybeChartFromSample(sample) {
+    if (!sample || !Array.isArray(sample.sample_rows) || sample.sample_rows.length === 0) return null;
+    var cols = (sample.columns || []).map(function (c) { return c.name; });
+    if (cols.length !== 2) return null;
+    var labels = sample.sample_rows.map(function (r) { return r[cols[0]]; });
+    var values = sample.sample_rows.map(function (r) { return r[cols[1]]; });
+    if (!isNumericArr(values)) return null;
+    if (labels.length > 30) return null;  // 太多类别就不画了
+    return { labels: labels, values: values, labelCol: cols[0], valueCol: cols[1] };
+  }
+
+  // ---------- 业务卡：query_beelink_sql 成功 ----------
+  async function renderBeelinkResult(sess, evt) {
+    var parsed;
+    try { parsed = typeof evt.stdout === 'string' ? JSON.parse(evt.stdout) : evt.stdout; }
+    catch (e) { parsed = null; }
     var card = el('div', {class: 'card'});
     var ok = parsed && parsed.status === 'ok';
     var reused = !!(parsed && parsed.reused);
-    var headCls = ok ? (reused ? 'reused' : 'ok') : 'err';
-    var title = ok ? (reused ? '🗄️ beelink SQL（命中缓存，复用上次结果）' : '🗄️ beelink 执行 SQL · 成功')
-                   : '🗄️ beelink 执行 SQL · 失败';
-    card.appendChild(el('div', {class: 'card-head ' + headCls, text: title}));
-    var body = el('div', {class: 'card-body'});
-    if (parsed && ok) {
-      var pairs = [
-        ['表名', parsed.table_name || '(无)'],
-        ['行数', String(parsed.row_count == null ? '-' : parsed.row_count)],
-        ['列', (parsed.columns || []).map(function (c) { return c.name + (c.dtype ? '(' + c.dtype + ')' : ''); }).join(', ') || '(无)']
-      ];
-      if (reused) pairs.push(['复用', '是（同 SQL 已在本轮执行过）']);
-      body.appendChild(kv(pairs));
-      if (parsed.sql || parsed.source_query) {
-        var det = el('details');
-        det.appendChild(el('summary', {text: '查看 SQL'}));
-        var pre = el('pre', {class: 'code', text: parsed.sql || parsed.source_query});
-        det.appendChild(pre);
-        body.appendChild(det);
-      }
-    } else {
-      var errText = (parsed && parsed.errorMessage) || evt.error || evt.stdout || '(无错误信息)';
-      body.appendChild(el('pre', {class: 'txt', text: String(errText).slice(0, 2000)}));
+    if (!ok) {
+      card.appendChild(el('div', {class: 'card-head err', text: '🗄️ beelink 执行 SQL · 失败'}));
+      var body = el('div', {class: 'card-body'});
+      body.appendChild(el('pre', {class: 'code', text: String(evt.error || evt.stdout || '').slice(0, 2000)}));
+      card.appendChild(body);
+      sess.content.appendChild(card);
+      return;
     }
+    var title = reused ? '🗄️ beelink SQL（命中缓存，复用上次结果）' : '🗄️ beelink 执行 SQL · 成功';
+    card.appendChild(el('div', {class: 'card-head ' + (reused ? 'reused' : 'ok'), text: title}));
+    var body = el('div', {class: 'card-body'});
+    body.appendChild(kv([
+      ['表名', parsed.table_name || '(无)'],
+      ['行数', String(parsed.row_count == null ? '-' : parsed.row_count)],
+      ['列', (parsed.columns || []).map(function (c) { return c.name + (c.dtype ? ' (' + c.dtype + ')' : ''); }).join(', ') || '(无)']
+    ]));
+    if (parsed.sql || parsed.source_query) {
+      var det = el('details');
+      det.appendChild(el('summary', {text: '查看 SQL'}));
+      det.appendChild(el('pre', {class: 'code', text: parsed.sql || parsed.source_query}));
+      body.appendChild(det);
+    }
+    // 占位行：稍后异步填数据
+    var sampleSlot = el('div', {class: 'muted', text: '正在读取样例行…'});
+    body.appendChild(sampleSlot);
     card.appendChild(body);
     sess.content.appendChild(card);
+
+    // 异步抓 sample_rows
+    var sample = await fetchSampleRows(sess.identity, sess.workspace, parsed.table_name);
+    sampleSlot.innerHTML = '';
+    if (!sample || !Array.isArray(sample.sample_rows) || sample.sample_rows.length === 0) {
+      sampleSlot.textContent = '未能读取样例行，可到 workspace 查看表「' + parsed.table_name + '」。';
+      return;
+    }
+    var cols = (sample.columns || []).map(function (c) { return c.name; });
+    var tbl = renderTable(cols, sample.sample_rows, {limit: 50});
+    sampleSlot.appendChild(tbl.table);
+    if (tbl.shown < tbl.total) {
+      sampleSlot.appendChild(el('div', {class: 'muted', text: '仅显示前 ' + tbl.shown + ' / ' + tbl.total + ' 行。'}));
+    }
+    var chartCfg = maybeChartFromSample(sample);
+    if (chartCfg) {
+      sampleSlot.appendChild(el('div', {class: 'muted', text: '简单柱状图（' + chartCfg.labelCol + ' × ' + chartCfg.valueCol + '）'}));
+      sampleSlot.appendChild(renderBarChart(chartCfg.labels, chartCfg.values));
+    }
   }
 
-  function renderExploreResult(sess, evt) {
-    // 只挑"看起来像 DataFrame 输出"的成功 stdout 入卡，其余进调试区即可
-    if (evt.status !== 'ok' || !evt.stdout) return;
-    sess.lastExploreStdout = evt.stdout;  // 留一份给收尾时兜底
-  }
-
+  // ---------- 业务卡：clarify / completion / error ----------
   function renderClarify(sess, evt) {
     var card = el('div', {class: 'card'});
     card.appendChild(el('div', {class: 'card-head clarify', text: '❓ Agent 需要澄清'}));
     var body = el('div', {class: 'card-body'});
     if (evt.thought) body.appendChild(el('div', {class: 'muted', text: evt.thought}));
     (evt.questions || []).forEach(function (q) {
-      var line = el('div', {text: '• ' + (q.text || JSON.stringify(q)).slice(0, 800)});
-      body.appendChild(line);
+      var txt = (q && q.text) || (typeof q === 'string' ? q : JSON.stringify(q));
+      body.appendChild(el('div', {text: '• ' + String(txt).slice(0, 800)}));
     });
     card.appendChild(body);
     sess.content.appendChild(card);
@@ -349,53 +373,75 @@ _CHATBI_HTML = r"""<!DOCTYPE html>
     sess.content.appendChild(card);
   }
 
-  function renderThinking(sess, evt) {
-    var txt = (evt.content || '').trim();
-    if (!txt) return;
-    var d = el('div', {class: 'muted', text: '💭 ' + txt});
-    sess.content.appendChild(d);
+  function renderError(sess, evt) {
+    var card = el('div', {class: 'card'});
+    card.appendChild(el('div', {class: 'card-head err', text: '✖ 错误'}));
+    var body = el('div', {class: 'card-body'});
+    body.appendChild(el('pre', {class: 'code', text: JSON.stringify(evt, null, 2).slice(0, 2000)}));
+    card.appendChild(body);
+    sess.content.appendChild(card);
   }
 
-  function finalizeSession(sess) {
-    if (sess.finalized) return;
-    sess.finalized = true;
-    // 兜底：如果 explore 最后一条 stdout 像 DataFrame 表格，单独入一张卡
-    if (sess.lastExploreStdout) {
-      var parsed = tryParseDataFrameText(sess.lastExploreStdout);
-      if (parsed) {
-        var card = el('div', {class: 'card'});
-        card.appendChild(el('div', {class: 'card-head ok', text: '📊 Python 分析结果（来自 explore stdout）'}));
-        var body = el('div', {class: 'card-body'});
-        body.appendChild(renderTable(parsed));
-        body.appendChild(el('div', {class: 'muted', text: '仅显示前 50 行；完整数据在 workspace。'}));
-        card.appendChild(body);
-        sess.content.appendChild(card);
-      }
-    }
+  // ---------- 进度芯片 ----------
+  function bumpProgress(sess, tool) {
+    sess.counts[tool] = (sess.counts[tool] || 0) + 1;
+    var existing = sess.progress.querySelector('[data-tool="' + tool + '"]');
+    var meta = TOOL_LABEL[tool] || {label: '🔧 ' + tool, cls: ''};
+    if (existing) { existing.textContent = meta.label + ' ×' + sess.counts[tool]; return; }
+    var chip = el('span', {class: 'pchip ' + meta.cls});
+    chip.dataset.tool = tool;
+    chip.textContent = meta.label + ' ×' + sess.counts[tool];
+    sess.progress.appendChild(chip);
+  }
+
+  function bumpThinking(sess) {
+    sess.thinkingCount = (sess.thinkingCount || 0) + 1;
+    var existing = sess.progress.querySelector('[data-tool="__thinking__"]');
+    var label = '💭 Agent 正在分析 ×' + sess.thinkingCount;
+    if (existing) { existing.textContent = label; return; }
+    var chip = el('span', {class: 'pchip think'});
+    chip.dataset.tool = '__thinking__';
+    chip.textContent = label;
+    sess.progress.appendChild(chip);
+  }
+
+  // ---------- 会话 ----------
+  function newSession(question, identity, workspace) {
+    var card = el('div', {class: 'qcard'});
+    var head = el('div', {class: 'qhead'});
+    head.appendChild(el('div', {class: 'qlabel', text: 'YOU ASKED'}));
+    head.appendChild(el('div', {class: 'qtext', text: question}));
+    card.appendChild(head);
+    var body = el('div', {class: 'qbody'});
+    var progress = el('div', {class: 'progress'});
+    body.appendChild(progress);
+    var content = el('div', {class: 'qcontent'});
+    body.appendChild(content);
+    card.appendChild(body);
+    stageEl.appendChild(card);
+    return { card: card, body: body, progress: progress, content: content,
+             counts: {}, thinkingCount: 0,
+             identity: identity, workspace: workspace };
   }
 
   // ---------- 事件分发 ----------
-  function handleEvent(sess, evt) {
+  async function handleEvent(sess, evt) {
     var t = evt.type;
     if (t === 'thinking_text') {
-      renderThinking(sess, evt);
+      bumpThinking(sess);
+      // thinking 原文进调试区，不进主区
+      if (evt.content) debugLog('  [thinking] ' + String(evt.content).slice(0, 400));
     } else if (t === 'tool_start') {
       bumpProgress(sess, evt.tool || 'unknown');
     } else if (t === 'tool_result') {
-      if (evt.tool === 'query_beelink_sql') renderBeelinkResult(sess, evt);
-      else if (evt.tool === 'explore') renderExploreResult(sess, evt);
-      // search_data_tables / inspect_source_data / read_catalog_metadata 默认只走进度芯片
+      if (evt.tool === 'query_beelink_sql') await renderBeelinkResult(sess, evt);
+      // 其他 tool 默认不进主区，仅进度芯片 + 调试区
     } else if (t === 'clarify') {
       renderClarify(sess, evt);
     } else if (t === 'completion' || t === 'result') {
       renderCompletion(sess, evt);
     } else if (t === 'error') {
-      var card = el('div', {class: 'card'});
-      card.appendChild(el('div', {class: 'card-head err', text: '✖ 错误'}));
-      var body = el('div', {class: 'card-body'});
-      body.appendChild(el('pre', {class: 'txt', text: JSON.stringify(evt, null, 2).slice(0, 2000)}));
-      card.appendChild(body);
-      sess.content.appendChild(card);
+      renderError(sess, evt);
     }
     window.scrollTo(0, document.body.scrollHeight);
   }
@@ -420,9 +466,9 @@ _CHATBI_HTML = r"""<!DOCTYPE html>
     if (!api_key) { alert('请填 api_key（仅浏览器内存）'); return; }
     if (!question) { alert('请填问题'); return; }
 
-    rawPreEl.textContent = '';
+    debugPreEl.textContent = '';
     setBusy(true, '请求中…');
-    var sess = newSession(question);
+    var sess = newSession(question, identity, workspace);
 
     var body = {
       model: { endpoint: endpoint, model: model, api_key: api_key,
@@ -443,9 +489,8 @@ _CHATBI_HTML = r"""<!DOCTYPE html>
       });
       if (!resp.ok) {
         var errText = await resp.text();
-        handleEvent(sess, { type: 'error', status: resp.status, body: errText.slice(0, 1000) });
+        await handleEvent(sess, { type: 'error', status: resp.status, body: errText.slice(0, 1000) });
         setBusy(false, '失败 HTTP ' + resp.status);
-        finalizeSession(sess);
         return;
       }
       var reader = resp.body.getReader();
@@ -460,20 +505,17 @@ _CHATBI_HTML = r"""<!DOCTYPE html>
         for (var i = 0; i < lines.length; i++) {
           var line = lines[i].trim();
           if (!line) continue;
-          rawPreEl.textContent += line + '\n';
-          try { handleEvent(sess, JSON.parse(line)); }
-          catch (e) { /* 解析失败的行只入调试区 */ }
+          debugLog(line);
+          try { await handleEvent(sess, JSON.parse(line)); } catch (e) {}
         }
       }
       if (buf.trim()) {
-        rawPreEl.textContent += buf + '\n';
-        try { handleEvent(sess, JSON.parse(buf)); } catch (e) {}
+        debugLog(buf);
+        try { await handleEvent(sess, JSON.parse(buf)); } catch (e) {}
       }
-      finalizeSession(sess);
       setBusy(false, '完成');
     } catch (e) {
-      handleEvent(sess, { type: 'error', message: String(e && e.message || e) });
-      finalizeSession(sess);
+      await handleEvent(sess, { type: 'error', message: String(e && e.message || e) });
       setBusy(false, '异常');
     }
   });
