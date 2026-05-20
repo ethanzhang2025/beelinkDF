@@ -192,6 +192,9 @@ _CHATBI_HTML = r"""<!DOCTYPE html>
          max-width: 1080px; margin: 16px auto; padding: 0 16px; line-height: 1.5; color: #1f2937; }
   h1 { font-size: 18px; margin: 0 0 4px; }
   .sub { color: #6b7280; font-size: 13px; margin-bottom: 12px; }
+  .topbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 4px; }
+  .topbar a.df-entry { font-size: 13px; color: #2563eb; text-decoration: none; border: 1px solid #2563eb; padding: 4px 10px; border-radius: 4px; background: #fff; }
+  .topbar a.df-entry:hover { background: #eff6ff; }
 
   fieldset { border: 1px solid #d1d5db; border-radius: 6px; padding: 10px 14px; margin-bottom: 10px; }
   legend { padding: 0 6px; font-weight: 600; font-size: 13px; color: #374151; }
@@ -262,7 +265,10 @@ _CHATBI_HTML = r"""<!DOCTYPE html>
 </style>
 </head>
 <body>
-  <h1>beelink ChatBI 演示 (POC)</h1>
+  <div class="topbar">
+    <h1>beelink ChatBI 演示 (POC)</h1>
+    <a class="df-entry" href="/" title="不经问数直接进入 Data Formulator 原生分析页">→ 数据分析</a>
+  </div>
   <div class="sub">DataAgent + <code>query_beelink_sql</code> 智能问数。api_key 由服务端管，浏览器不持有。</div>
 
   <form id="form">

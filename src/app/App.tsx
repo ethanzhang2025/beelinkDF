@@ -777,6 +777,17 @@ const AppShell: FC = () => {
                         {isAppPage && (
                             <Box sx={{ display: 'flex', ml: 'auto', fontSize: 14, alignItems: 'center' }}>
                                 <LanguageSwitcher />
+                                {/* beelink 产品化：直跳 ChatBI 演示页（不依赖 DF 状态机） */}
+                                <Tooltip title="打开 ChatBI 问数演示页（不影响当前 DF 会话）">
+                                    <IconButton
+                                        component="a"
+                                        href="/chatbi"
+                                        size="small"
+                                        sx={{ color: 'inherit', fontSize: 12, px: 1, borderRadius: 1, '&:hover': { backgroundColor: 'rgba(0,0,0,0.04)' } }}
+                                    >
+                                        ChatBI
+                                    </IconButton>
+                                </Tooltip>
                                 {/* beelink 产品化：去 ConfigDialog，统一到模型设置入口 */}
                                 <ModelSelectionButton />
                                 {activeWorkspace && (
