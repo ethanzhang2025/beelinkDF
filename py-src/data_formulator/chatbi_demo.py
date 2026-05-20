@@ -502,8 +502,14 @@ _CHATBI_HTML = r"""<!DOCTYPE html>
     channels:     '渠道',
     sales_orders: '销售订单'
   };
+  // 元数据意图：问"有多少 / 哪些 / 列出 / 清单"等围绕"表"为对象
+  // 关键：必须含"表"字 + 含问元数据的关键词；含"字段/列/字段名"则不属于此意图（走 DataAgent）
   function isListTablesIntent(q) {
-    return /有哪些表|哪些表|列出表|列出.{0,5}表|表清单|有什么表|什么表|当前库.{0,8}表|这个库.{0,8}表|table\s*list|list\s*tables/i.test(q);
+    if (!q) return false;
+    if (/字段|列名|有哪些列/i.test(q)) return false;
+    var hasTableWord = /表/.test(q) || /\btables?\b/i.test(q);
+    if (!hasTableWord) return false;
+    return /有哪些|哪些|列出|清单|有什么|什么表|多少张|多少个|多少表|几张|几个表|how\s*many|list\s*tables|table\s*list/i.test(q);
   }
   async function fetchSourceTables(identity, workspace, connectorId, sourceName) {
     var resp = await fetch('/api/connectors/get-catalog-tree', {
@@ -537,7 +543,8 @@ _CHATBI_HTML = r"""<!DOCTYPE html>
       card.appendChild(el('div', {class: 'card-head ok',
                                   text: '📚 ' + LIST_TABLES_DEFAULTS.source + ' 表清单'}));
       var body = el('div', {class: 'card-body'});
-      body.appendChild(el('div', {class: 'headline', text: '共 ' + tables.length + ' 张表'}));
+      body.appendChild(el('div', {class: 'headline',
+        text: LIST_TABLES_DEFAULTS.source + ' 当前共有 ' + tables.length + ' 张表。'}));
       body.appendChild(el('div', {class: 'meta',
         text: '来源 connector ' + LIST_TABLES_DEFAULTS.connector_id +
               ' · 走 /api/connectors/get-catalog-tree（不经 DataAgent）'}));
