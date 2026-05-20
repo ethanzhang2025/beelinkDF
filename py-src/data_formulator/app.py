@@ -244,6 +244,64 @@ _register_blueprints()
 _safety_checks()
 
 
+# 智能问数：build 产物最小 gzip + 长缓存
+#
+# - `/assets/<hashed>.js|css|...`：vite build 已写文件名 hash，标记 immutable 长缓存
+# - `/`、`/DataFormulator.js`、`/index.html` 等无 hash 入口：保留 no-cache + ETag
+# - JS/CSS/HTML/JSON/SVG 在客户端 Accept-Encoding 含 gzip 且 body > 1KB 时压缩
+# - `/api/*` 不进 gzip 分支（避免破坏 SSE / 流式响应）
+# - 流式（direct_passthrough）响应不压缩
+import gzip as _gzip
+
+_COMPRESSIBLE_PREFIXES = (
+    'application/javascript',
+    'application/json',
+    'text/html',
+    'text/css',
+    'text/plain',
+    'image/svg+xml',
+)
+_MIN_GZIP_BYTES = 1024
+
+
+@app.after_request
+def _add_static_compression_and_cache(response):
+    path = request.path
+
+    if path.startswith('/assets/'):
+        # vite hashed 文件：长缓存 + immutable，浏览器拿到后无需再发 If-None-Match
+        response.headers['Cache-Control'] = 'public, max-age=31536000, immutable'
+
+    # API 不进 gzip 分支：避免污染 SSE / agent-stream 等流式响应
+    if path.startswith('/api/') or path.startswith('/chatbi/agent-stream'):
+        return response
+    if response.direct_passthrough:
+        # send_from_directory 默认 True，强制关掉以便 read body
+        response.direct_passthrough = False
+    if response.headers.get('Content-Encoding'):
+        return response
+    if 'gzip' not in (request.headers.get('Accept-Encoding') or ''):
+        return response
+
+    mime = (response.mimetype or '').lower()
+    if not any(mime.startswith(p) for p in _COMPRESSIBLE_PREFIXES):
+        return response
+
+    body = response.get_data()
+    if len(body) < _MIN_GZIP_BYTES:
+        return response
+
+    compressed = _gzip.compress(body, compresslevel=6)
+    response.set_data(compressed)
+    response.headers['Content-Encoding'] = 'gzip'
+    response.headers['Content-Length'] = str(len(compressed))
+    vary = response.headers.get('Vary', '')
+    if 'Accept-Encoding' not in vary:
+        response.headers['Vary'] = (vary + ', Accept-Encoding').lstrip(', ') if vary else 'Accept-Encoding'
+
+    return response
+
+
 @app.route('/api/example-datasets')
 def get_sample_datasets():
     from data_formulator.example_datasets_config import EXAMPLE_DATASETS
