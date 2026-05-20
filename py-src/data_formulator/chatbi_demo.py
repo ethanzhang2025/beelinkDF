@@ -21,11 +21,98 @@ import json as _json
 import os
 import urllib.request
 import urllib.error
+from pathlib import Path
 
+import yaml
 from flask import Blueprint, Response, request, jsonify
 
 
 chatbi_bp = Blueprint("chatbi", __name__)
+
+_SEMANTIC_DIR = Path(__file__).parent / "semantic"
+
+
+def _load_semantic(source: str) -> dict:
+    """加载 source 对应的轻语义 YAML；找不到/解析失败返 {}。"""
+    if not source:
+        return {}
+    safe = source.replace("/", "_").replace("..", "_")
+    path = _SEMANTIC_DIR / f"{safe}.yaml"
+    if not path.is_file():
+        return {}
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _semantic_to_prompt(sem: dict) -> str:
+    """把语义对象压成 LLM prompt 上下文字符串（紧凑、稳定，避免无关字段）。"""
+    if not sem:
+        return ""
+    lines = []
+    src = sem.get("source") or "?"
+    lines.append("[Semantic context for source `{}`]".format(src))
+    if sem.get("display_name") or sem.get("description"):
+        lines.append("- domain: {}".format(sem.get("display_name") or ""))
+        desc = (sem.get("description") or "").strip()
+        if desc:
+            lines.append("  " + desc.replace("\n", " ").strip())
+    tables = sem.get("tables") or {}
+    if tables:
+        lines.append("- tables:")
+        for t_name, t in tables.items():
+            cols = (t or {}).get("columns") or {}
+            col_brief = ", ".join(
+                "{}({})".format(c, (cv or {}).get("display") or "")
+                for c, cv in cols.items()
+            )
+            lines.append("  * {}: {} | pk={} | columns: {}".format(
+                t_name, (t or {}).get("purpose") or "",
+                (t or {}).get("primary_key") or "?", col_brief))
+    joins = sem.get("joins") or []
+    if joins:
+        lines.append("- joins:")
+        for j in joins:
+            lines.append("  * {l}.{lk} = {r}.{rk}".format(
+                l=j.get("left"), lk=j.get("left_key"),
+                r=j.get("right"), rk=j.get("right_key")))
+    metrics = sem.get("metrics") or []
+    if metrics:
+        lines.append("- metrics:")
+        for m in metrics:
+            lines.append("  * {n} = {e}  (on {t}; {d})".format(
+                n=m.get("name"), e=m.get("expr"),
+                t=m.get("table"), d=m.get("desc") or ""))
+    typical = sem.get("typical_questions") or []
+    if typical:
+        lines.append("- typical_questions:")
+        for tq in typical:
+            lines.append("  * Q: {q} → {h}".format(
+                q=tq.get("q"), h=tq.get("sql_hint") or ""))
+    lines.append("[Rules]")
+    lines.append("- Use ONLY the tables/columns above; do NOT invent.")
+    lines.append("- Prefer direct SELECT via `query_beelink_sql`; only inspect catalog if a SELECT actually fails.")
+    lines.append("- If joining, use the listed join keys.")
+    lines.append("- If a needed field truly doesn't exist (e.g. amount missing), say so and substitute with COUNT(*).")
+    return "\n".join(lines)
+
+
+@chatbi_bp.route("/chatbi/semantic", methods=["GET"])
+def chatbi_semantic():
+    """返回 source 的精简语义上下文（前端注入 DataAgent prompt 用）。
+    GET /chatbi/semantic?source=smartquery_demo
+    Response: { has_semantic: bool, prompt: "...", raw: {...} }
+    """
+    source = (request.args.get("source") or "").strip()
+    sem = _load_semantic(source)
+    return jsonify({
+        "has_semantic": bool(sem),
+        "prompt": _semantic_to_prompt(sem),
+        "raw": sem,
+    })
 
 
 def _server_api_key() -> str:
@@ -809,19 +896,27 @@ _CHATBI_HTML = r"""<!DOCTYPE html>
   }
 
   async function runDataAgent(sess, question) {
-    // 给 DataAgent 加上当前数据源上下文 + 反臆测约束（不针对任何特定表）
-    var guardrail = [
+    // 拉取轻语义上下文（如有；找不到则为空字符串），注入 prompt
+    var semanticPrompt = '';
+    try {
+      var semResp = await fetch('/chatbi/semantic?source=' + encodeURIComponent(sess.source));
+      if (semResp.ok) {
+        var semJson = await semResp.json();
+        if (semJson && semJson.prompt) semanticPrompt = semJson.prompt;
+      }
+    } catch (e) {}
+
+    var baseGuardrail = [
       '[Context]',
       'Current beelink data source schema: `' + sess.source + '`.',
       '',
       '[Behavior — follow strictly]',
       '- For analysis questions (group by / sum / count / top-N / 按 X 统计 / 各 X), issue the SELECT directly via `query_beelink_sql`. Do NOT pre-list tables via INFORMATION_SCHEMA — only inspect metadata if a SELECT actually fails with "table not found".',
       '- Stay within schema `' + sess.source + '`. If a table name is mentioned without schema prefix, interpret it as `' + sess.source + '.<table>`.',
-      '- If the user mentions a column like "gender" / "age_group" / "category" without table, assume the most plausible table in this schema (typically the one whose name matches the entity, e.g. 客户/customers, 商品/products).',
-      '- Do not invent tables. If a SELECT fails, stop probing further and answer with what was found.',
-      '',
-      '[User question]'
+      '- If the user mentions a column like "gender" / "age_group" / "category" without table, assume the most plausible table in this schema.',
+      '- Do not invent tables or columns. If a SELECT fails, stop probing and answer with what was found.'
     ].join('\n');
+    var guardrail = baseGuardrail + (semanticPrompt ? '\n\n' + semanticPrompt : '') + '\n\n[User question]';
     var fullQ = guardrail + '\n' + question;
 
     var streamUrl = SERVER_HAS_KEY ? '/chatbi/agent-stream' : '/api/agent/data-agent-streaming';

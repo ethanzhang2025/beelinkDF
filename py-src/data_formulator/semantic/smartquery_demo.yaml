@@ -1,0 +1,106 @@
+# smartquery_demo 轻语义层 v1
+# 仅基于真实 catalog 字段与样例数据写最小解释，不臆造未观察到的字段或指标。
+# 加载方：py-src/data_formulator/chatbi_demo.py
+# 范围：DataAgent 分支会把精简版作为 prompt 上下文注入；list_tables / describe_table /
+#       sample_table / simple_aggregate 等 LLM-free 路由不受影响。
+
+source: smartquery_demo
+display_name: 销售演示数据集
+description: |
+  电商场景的最小示例数据：客户、商品、商品分类、地区、销售渠道、销售订单
+  6 张表；以 sales_orders 为事实表，其他 5 张为维度表。
+
+tables:
+
+  customers:
+    display_name: 客户
+    purpose: 客户主档；记录客户基础属性
+    primary_key: id
+    columns:
+      id:            { display: 客户 ID,   desc: 客户唯一标识 }
+      name:          { display: 客户名,    desc: 客户姓名 }
+      gender:        { display: 性别,      desc: 性别（女/男/未知） }
+      region_id:     { display: 地区 ID,   desc: 关联 regions.id }
+      registered_at: { display: 注册日期,  desc: 字符串日期，形如 2023-11-24 }
+      age_group:     { display: 年龄段,    desc: 文本分桶（18-24 / 25-34 / 35-44 / 45-54 / 55+ 等） }
+
+  products:
+    display_name: 商品
+    purpose: 商品主档；记录商品基础属性与售价/成本
+    primary_key: id
+    columns:
+      id:          { display: 商品 ID,     desc: 商品唯一标识 }
+      name:        { display: 商品名,      desc: 商品名称 }
+      category_id: { display: 分类 ID,     desc: 关联 categories.id }
+      price:       { display: 售价,        desc: 单价 }
+      cost:        { display: 成本,        desc: 单位成本 }
+
+  categories:
+    display_name: 商品分类
+    purpose: 商品分类维度表
+    primary_key: id
+    columns:
+      id:   { display: 分类 ID, desc: 分类唯一标识 }
+      name: { display: 分类名,  desc: 分类名称 }
+
+  regions:
+    display_name: 地区
+    purpose: 地区维度表
+    primary_key: id
+    columns:
+      id:   { display: 地区 ID, desc: 地区唯一标识 }
+      name: { display: 地区名,  desc: 地区名称 }
+
+  channels:
+    display_name: 销售渠道
+    purpose: 销售渠道维度表（如 天猫 / 京东 / 抖音）
+    primary_key: id
+    columns:
+      id:   { display: 渠道 ID, desc: 渠道唯一标识 }
+      name: { display: 渠道名,  desc: 渠道名称 }
+
+  sales_orders:
+    display_name: 销售订单
+    purpose: 销售订单事实表；含金额、数量、退货标记、订单状态
+    primary_key: id
+    columns:
+      id:            { display: 订单 ID,   desc: 订单唯一标识 }
+      order_date:    { display: 下单日期,  desc: 字符串日期 }
+      amount:        { display: 订单金额,  desc: 单笔订单总金额（已含 quantity 影响） }
+      quantity:      { display: 数量,      desc: 订单中商品件数 }
+      customer_id:   { display: 客户 ID,   desc: 关联 customers.id }
+      customer_name: { display: 客户名(冗余), desc: 冗余存储；优先 join customers 取 name }
+      region_id:     { display: 地区 ID,   desc: 关联 regions.id }
+      category_id:   { display: 分类 ID,   desc: 关联 categories.id }
+      channel_id:    { display: 渠道 ID,   desc: 关联 channels.id }
+      product_id:    { display: 商品 ID,   desc: 关联 products.id }
+      is_returned:   { display: 是否退货,  desc: 0/1，1 表示已退货 }
+      status:        { display: 订单状态,  desc: 文本如 paid / pending / cancelled }
+
+# join 关系：均为 sales_orders.<fk> = <dim>.id
+joins:
+  - { left: sales_orders, left_key: customer_id, right: customers,  right_key: id }
+  - { left: sales_orders, left_key: region_id,   right: regions,    right_key: id }
+  - { left: sales_orders, left_key: category_id, right: categories, right_key: id }
+  - { left: sales_orders, left_key: channel_id,  right: channels,   right_key: id }
+  - { left: sales_orders, left_key: product_id,  right: products,   right_key: id }
+  - { left: customers,    left_key: region_id,   right: regions,    right_key: id }
+  - { left: products,     left_key: category_id, right: categories, right_key: id }
+
+# 常用指标（基于真实字段；不臆造）
+metrics:
+  - { name: 订单数,       expr: "COUNT(*)",                table: sales_orders, desc: 事实表行数 }
+  - { name: 销售额,       expr: "SUM(amount)",             table: sales_orders, desc: 订单金额合计 }
+  - { name: 销售件数,     expr: "SUM(quantity)",           table: sales_orders, desc: 件数合计 }
+  - { name: 退货数,       expr: "SUM(is_returned)",        table: sales_orders, desc: 退货订单数 }
+  - { name: 客户数,       expr: "COUNT(*)",                table: customers,    desc: 客户主档行数 }
+  - { name: 活跃客户数,   expr: "COUNT(DISTINCT customer_id)", table: sales_orders, desc: 有过订单的客户数 }
+
+# 常见问题模板（仅用于 LLM 上下文示例，不做 deterministic 匹配）
+typical_questions:
+  - { q: 各渠道订单数,       sql_hint: "JOIN sales_orders + channels，按 channels.name 分组 COUNT(*)" }
+  - { q: 各商品分类销售额,   sql_hint: "JOIN sales_orders + categories，按 categories.name 分组 SUM(amount)" }
+  - { q: 各地区客户数,       sql_hint: "JOIN customers + regions，按 regions.name 分组 COUNT(*)" }
+  - { q: 最畅销的 N 件商品, sql_hint: "JOIN sales_orders + products，按 products.name 分组 SUM(quantity) 或 COUNT(*)，ORDER BY 降序 LIMIT N" }
+  - { q: 性别分布,           sql_hint: "customers 表按 gender 分组 COUNT(*)" }
+  - { q: 年龄段分布,         sql_hint: "customers 表按 age_group 分组 COUNT(*)" }
