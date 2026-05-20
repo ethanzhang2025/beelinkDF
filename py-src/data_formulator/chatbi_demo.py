@@ -325,11 +325,8 @@ _CHATBI_HTML = r"""<!DOCTYPE html>
     var ok = parsed && parsed.status === 'ok';
     var reused = !!(parsed && parsed.reused);
     if (!ok) {
-      card.appendChild(el('div', {class: 'card-head err', text: '🗄️ beelink 执行 SQL · 失败'}));
-      var body = el('div', {class: 'card-body'});
-      body.appendChild(el('pre', {class: 'code', text: String(evt.error || evt.stdout || '').slice(0, 2000)}));
-      card.appendChild(body);
-      sess.content.appendChild(card);
+      // 失败 tool_result 不进主区，避免 Agent 试错时屏幕铺满红卡；详情仍在底部调试区
+      debugLog('  [query_beelink_sql failed] ' + String(evt.error || evt.stdout || '').slice(0, 400));
       return;
     }
     sess.hasSuccess = true;  // 已取到 ok 结果：之后任何 clarify/action 都不进主区
@@ -512,10 +509,23 @@ _CHATBI_HTML = r"""<!DOCTYPE html>
     setBusy(true, '请求中…');
     var sess = newSession(question, identity, workspace);
 
+    // 给 Agent 加"探索约束"前缀，抑制猜未确认表名（不改后端，纯前端 prompt 工程）
+    var GUARDRAIL = [
+      '[Exploration constraints — must follow]',
+      '- Stay within the beelink data source schema `smartquery_demo` unless the user explicitly asks otherwise.',
+      '- Do not guess table or column names. Before querying any table, list real tables first via INFORMATION_SCHEMA.TABLES (or the existing catalog).',
+      '- For "what tables exist" style questions: return only real tables from INFORMATION_SCHEMA; do NOT issue SELECT ... FROM <table> on speculative names like sales / employees / suppliers / orders / users etc.',
+      '- When inferring table purposes, base it ONLY on real table names and their real columns; do NOT invent tables.',
+      '- If a table looks missing, stop and answer with what was actually found instead of probing further.',
+      '',
+      '[User question]'
+    ].join('\n');
+    var fullQuestion = GUARDRAIL + '\n' + question;
+
     var body = {
       model: { endpoint: endpoint, model: model, api_key: api_key,
                api_base: api_base, api_version: null, is_global: false },
-      input_tables: [], primary_tables: [], user_question: question
+      input_tables: [], primary_tables: [], user_question: fullQuestion
     };
 
     try {
