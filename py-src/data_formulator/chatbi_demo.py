@@ -16,10 +16,80 @@ WP-A v2：业务方可读视图
 """
 from __future__ import annotations
 
-from flask import Blueprint, Response
+import json as _json
+import os
+import urllib.request
+import urllib.error
+
+from flask import Blueprint, Response, request, jsonify
 
 
 chatbi_bp = Blueprint("chatbi", __name__)
+
+
+def _server_api_key() -> str:
+    """从服务端环境变量读 LLM key；仅供 /chatbi/agent-stream 内部注入用，不外泄。"""
+    return os.environ.get("DEEPSEEK_API_KEY", "")
+
+
+@chatbi_bp.route("/chatbi/llm-defaults", methods=["GET"])
+def chatbi_llm_defaults():
+    """报告服务端是否有 LLM key 与默认 model 配置；不返回 key 明文。"""
+    return jsonify({
+        "has_key": bool(_server_api_key()),
+        "endpoint": "openai",
+        "model": "deepseek-chat",
+        "api_base": "https://api.deepseek.com",
+    })
+
+
+@chatbi_bp.route("/chatbi/agent-stream", methods=["POST"])
+def chatbi_agent_stream():
+    """服务端代理：从 env 注入 api_key，再以流式转发到 /api/agent/data-agent-streaming。
+    前端只需发不含 api_key 的请求；浏览器侧从始至终不持有 key。"""
+    body = request.get_json(silent=True) or {}
+    api_key = _server_api_key()
+    if not api_key:
+        return jsonify({"error": "DEEPSEEK_API_KEY 未在服务端环境变量中设置"}), 503
+    model = body.get("model") or {}
+    if not isinstance(model, dict):
+        return jsonify({"error": "invalid model field"}), 400
+    model["api_key"] = api_key
+    model.setdefault("endpoint", "openai")
+    model.setdefault("api_base", "https://api.deepseek.com")
+    model.setdefault("api_version", None)
+    model.setdefault("is_global", False)
+    body["model"] = model
+
+    upstream_url = request.host_url.rstrip("/") + "/api/agent/data-agent-streaming"
+    req = urllib.request.Request(
+        upstream_url, data=_json.dumps(body).encode("utf-8"), method="POST")
+    req.add_header("Content-Type", "application/json")
+    for h in ("X-Identity-Id", "X-Workspace-Id"):
+        v = request.headers.get(h)
+        if v:
+            req.add_header(h, v)
+
+    try:
+        upstream = urllib.request.urlopen(req, timeout=300)
+    except urllib.error.HTTPError as e:
+        return Response(e.read(), status=e.code,
+                        mimetype=e.headers.get("Content-Type", "application/json"))
+    except urllib.error.URLError as e:
+        return jsonify({"error": "upstream URLError: " + str(e.reason)}), 502
+
+    def relay():
+        try:
+            while True:
+                chunk = upstream.read(4096)
+                if not chunk:
+                    break
+                yield chunk
+        finally:
+            upstream.close()
+
+    return Response(relay(),
+                    mimetype=upstream.headers.get("Content-Type", "application/x-ndjson"))
 
 
 _CHATBI_HTML = r"""<!DOCTYPE html>
@@ -180,6 +250,21 @@ _CHATBI_HTML = r"""<!DOCTYPE html>
   var warnEl = $('model_warn');
   var statusEl = $('status');
   var submitBtn = $('submit');
+
+  // 启动时探测：服务端是否已配 LLM key —— 若有则隐藏 api_key 输入框，提交时走代理
+  var SERVER_HAS_KEY = false;
+  (async function probeDefaults() {
+    try {
+      var r = await fetch('/chatbi/llm-defaults');
+      if (!r.ok) return;
+      var d = await r.json();
+      if (d && d.has_key) {
+        SERVER_HAS_KEY = true;
+        var lbl = document.getElementById('api_key').parentElement;
+        if (lbl) lbl.style.display = 'none';
+      }
+    } catch (e) {}
+  })();
 
   modelEl.addEventListener('change', function () {
     warnEl.style.display = modelEl.value === 'deepseek-chat' ? 'none' : 'block';
@@ -592,8 +677,8 @@ _CHATBI_HTML = r"""<!DOCTYPE html>
       setBusy(false, '完成');
       return;
     }
-    // 其他意图仍需 api_key 调 DataAgent
-    if (!api_key) { alert('请填 api_key（仅浏览器内存）'); return; }
+    // 其他意图调 DataAgent：服务端有 key 时走代理，否则要求用户填表单 key
+    if (!SERVER_HAS_KEY && !api_key) { alert('请填 api_key（仅浏览器内存）'); return; }
 
     // 给 Agent 加"探索约束"前缀，抑制猜未确认表名（不改后端，纯前端 prompt 工程）
     var GUARDRAIL = [
@@ -608,9 +693,16 @@ _CHATBI_HTML = r"""<!DOCTYPE html>
     ].join('\n');
     var fullQuestion = GUARDRAIL + '\n' + question;
 
+    // SERVER_HAS_KEY 时不在浏览器持有 api_key；改走 /chatbi/agent-stream，
+    // 由服务端从 env 注入 key 再转发到 /api/agent/data-agent-streaming。
+    var streamUrl = SERVER_HAS_KEY
+      ? '/chatbi/agent-stream'
+      : '/api/agent/data-agent-streaming';
+    var modelCfg = { endpoint: endpoint, model: model,
+                     api_base: api_base, api_version: null, is_global: false };
+    if (!SERVER_HAS_KEY) modelCfg.api_key = api_key;
     var body = {
-      model: { endpoint: endpoint, model: model, api_key: api_key,
-               api_base: api_base, api_version: null, is_global: false },
+      model: modelCfg,
       input_tables: [], primary_tables: [], user_question: fullQuestion
     };
 
@@ -619,7 +711,7 @@ _CHATBI_HTML = r"""<!DOCTYPE html>
         method: 'GET',
         headers: { 'X-Identity-Id': identity, 'X-Workspace-Id': workspace }
       });
-      var resp = await fetch('/api/agent/data-agent-streaming', {
+      var resp = await fetch(streamUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json',
                    'X-Identity-Id': identity, 'X-Workspace-Id': workspace },
