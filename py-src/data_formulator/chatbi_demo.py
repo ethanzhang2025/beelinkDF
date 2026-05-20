@@ -569,23 +569,22 @@ _CHATBI_HTML = r"""<!DOCTYPE html>
     return null;
   }
 
-  // ---- list_tables: catalog-tree ----
+  // ---- list_tables: 调 get-catalog(path=[source]) 拿单层 ----
+  // BeelinkDataLoader 现在默认 lazy 顶层：catalog-tree 顶层只回 5 个
+  // source 占位，无 children。要拿某 source 下的表名清单必须走 ls(path)。
   async function fetchSourceTables(sess) {
-    var resp = await fetch('/api/connectors/get-catalog-tree', {
+    var resp = await fetch('/api/connectors/get-catalog', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json',
                  'X-Identity-Id': sess.identity, 'X-Workspace-Id': sess.workspace },
-      body: JSON.stringify({ connector_id: sess.connectorId })
+      body: JSON.stringify({ connector_id: sess.connectorId, path: [sess.source] })
     });
-    if (!resp.ok) throw new Error('get-catalog-tree HTTP ' + resp.status);
+    if (!resp.ok) throw new Error('get-catalog HTTP ' + resp.status);
     var json = await resp.json();
-    var tree = (json && json.data && json.data.tree) || [];
-    for (var i = 0; i < tree.length; i++) {
-      if (tree[i].name === sess.source) {
-        return (tree[i].children || []).map(function (c) { return c.name; });
-      }
-    }
-    return [];
+    var nodes = (json && json.data && json.data.nodes) || [];
+    // 只取叶子 table；smartquery_demo 等直挂表的 source 这里都是 table 节点
+    return nodes.filter(function (n) { return n.node_type === 'table'; })
+                .map(function (n) { return n.name; });
   }
   async function runListTables(sess) {
     setStatus(sess, '查询 catalog…');

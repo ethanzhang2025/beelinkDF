@@ -650,8 +650,12 @@ const DataSourceSidebarPanel: React.FC<{
             // small/scoped catalogs (Sakila, single-DB Postgres) reveal
             // their tables on first render. Tree data is already in memory,
             // so this is purely a UI default.
+            // beelink lazy 占位（无 children 字段）跳过 autoExpand，避免
+            // 顶层 5 个 source 一上来就触发 onLazyExpand 把 mysql 1000+
+            // schema 同步拉下来（首屏卡顿的根因）。
             const topNamespaceIds = tree
-                .filter(n => n.node_type === 'namespace' || n.node_type === 'table_group')
+                .filter(n => (n.node_type === 'namespace' || n.node_type === 'table_group')
+                              && n.children !== undefined)
                 .map(n => n.path.join('/'));
             const autoExpand = topNamespaceIds.length > 0 && topNamespaceIds.length <= 10
                 ? topNamespaceIds
@@ -669,6 +673,63 @@ const DataSourceSidebarPanel: React.FC<{
             }));
         } finally {
             fetchingRef.current.delete(fetchKey);
+        }
+    }, [dispatch, t]);
+
+    /** Lazy expand：点击 namespace 占位（无 children 字段）时调 GET_CATALOG
+     *  拿子层节点并注入到 catalog cache 中对应位置。配合 BeelinkDataLoader
+     *  的 shallow list_tables / ls(path)，让 mysql 1000+ schema 只在用户
+     *  主动展开时才被拉，首屏只 5 个 source 占位。*/
+    const lazyExpandNode = useCallback(async (connectorId: string, node: CatalogTreeNode) => {
+        if (node.children !== undefined) return;
+        const key = `lazy:${connectorId}:${node.path.join('/')}`;
+        if (fetchingRef.current.has(key)) return;
+        fetchingRef.current.add(key);
+        try {
+            const { data } = await apiRequest(CONNECTOR_ACTION_URLS.GET_CATALOG, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ connector_id: connectorId, path: node.path }),
+            });
+            const childNodes: CatalogTreeNode[] = (data.nodes || []).map((n: any) => ({
+                name: n.name,
+                node_type: n.node_type,
+                path: n.path,
+                metadata: n.metadata,
+                // 后端返回单层 list；下一级 namespace 同样 children===undefined，
+                // 让前端识别为 lazy 节点并允许递归 lazy 展开。
+            }));
+            setCatalogByConnector(prev => {
+                const entry = prev[connectorId];
+                const oldTree = entry?.data?.tree;
+                if (!oldTree) return prev;
+                const targetKey = node.path.join('/');
+                const inject = (nodes: CatalogTreeNode[]): CatalogTreeNode[] => nodes.map(n => {
+                    if (n.path.join('/') === targetKey) {
+                        return { ...n, children: childNodes };
+                    }
+                    if (n.children && n.children.length > 0) {
+                        return { ...n, children: inject(n.children) };
+                    }
+                    return n;
+                });
+                return {
+                    ...prev,
+                    [connectorId]: successLoadable(
+                        { tree: inject(oldTree), fetchedAt: entry.data.fetchedAt },
+                        cache => cache.tree.length === 0,
+                    ),
+                };
+            });
+        } catch (e: any) {
+            dispatch(dfActions.addMessages({
+                timestamp: Date.now(), type: 'warning',
+                component: 'data-source-sidebar',
+                value: e?.apiError?.message
+                    || t('dataLoading.syncPartial', { defaultValue: 'Catalog partial' }),
+            }));
+        } finally {
+            fetchingRef.current.delete(key);
         }
     }, [dispatch, t]);
 
@@ -1528,7 +1589,7 @@ const DataSourceSidebarPanel: React.FC<{
                                             onExpandedChange={(newIds) => {
                                                 setTreeExpanded(prev => ({ ...prev, [connector.id]: newIds }));
                                             }}
-                                            onLazyExpand={undefined}
+                                            onLazyExpand={(node) => lazyExpandNode(connector.id, node)}
                                             onItemClick={(node, e) => {
                                                 if (node.node_type === 'table') {
                                                     handlePreviewTable(connector.id, node, e.currentTarget as HTMLElement);

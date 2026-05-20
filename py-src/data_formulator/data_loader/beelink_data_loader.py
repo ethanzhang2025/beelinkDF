@@ -35,6 +35,7 @@ import pyarrow as pa
 import requests
 
 from data_formulator.data_loader.external_data_loader import (
+    CatalogNode,
     ExternalDataLoader,
     MAX_IMPORT_ROWS,
     infer_source_metadata_status,
@@ -296,9 +297,15 @@ class BeelinkDataLoader(ExternalDataLoader):
     _CATALOG_PAGE_SIZE = 1000
 
     def list_tables(self, table_filter: str | None = None) -> list[dict[str, Any]]:
-        """递归遍历所有 source/folder/space，收集叶子 DATASET 节点。
+        """无 filter 时只返回顶层 SOURCE 的 lazy 占位条目；带 filter 时
+        走完整 BFS 递归（搜索/sync_catalog_metadata 等场景仍能拿全表）。
 
-        防御措施：
+        Lazy 路径目的：首屏 ``/api/connectors/get-catalog-tree`` 不再为
+        mysql 这种带 1000+ schema 的 source 拉完整 2000+ 表，节点数被压
+        到 5（每个 source 一个 namespace 占位）。前端通过 ``ls(path=…)``
+        在用户点击展开时按需拉子层。
+
+        防御措施（filter 非空时的递归路径）：
         * 顶层只展开 ``containerType in {SOURCE, SPACE, HOME}``；
         * 整体节点访问数限制在 ``_LIST_TABLES_MAX_NODES`` 以内；
         * 任何子树读失败用 warning 跳过，不让单点异常吞掉整次遍历；
@@ -309,6 +316,31 @@ class BeelinkDataLoader(ExternalDataLoader):
 
         top_items = self._fetch_top_level_containers()
         if top_items is None:
+            return tables
+
+        # ── 无 filter：返回 lazy 顶层占位 ──────────────────────
+        # _tables_to_catalog_tree 识别 metadata._lazy_namespace=True 时
+        # 输出 namespace 节点且**不带** children 字段，前端据此触发 ls。
+        # 占位只保留 SOURCE/SPACE：HOME 是 Dremio 用户私有目录，原递归
+        # 实现走到这层也无 DATASET 可收集，lazy 路径同样不暴露 HOME 入口。
+        if keyword is None:
+            for item in top_items:
+                if item.get("containerType") not in {"SOURCE", "SPACE"}:
+                    continue
+                path = list(item.get("path") or [])
+                name = path[-1] if path else item.get("name") or ""
+                if not name:
+                    continue
+                tables.append({
+                    "name": name,
+                    "path": [name],
+                    "metadata": {
+                        "row_count": None,
+                        "columns": [],
+                        "_lazy_namespace": True,
+                    },
+                    "table_key": name,
+                })
             return tables
 
         # BFS 队列：(node_dict, accumulated_path_from_root)
@@ -388,6 +420,75 @@ class BeelinkDataLoader(ExternalDataLoader):
             if not page_token:
                 return
 
+    # ── lazy 单层 list（前端 onLazyExpand → /api/connectors/get-catalog）──
+    #
+    # 与 list_tables 不同，``ls`` 只 list 单层，不递归 CONTAINER。这是
+    # mysql / tpcds_12domain 等大库的关键：用户点击 source 时才拉它下层
+    # 1000+ schema 占位，点击具体 schema 时才拉里面的几张表。
+
+    def ls(self, path: list[str] | None = None,
+           filter: str | None = None) -> list[CatalogNode]:
+        keyword = (filter or "").strip().lower() or None
+        path = list(path or [])
+
+        # path=[]：顶层 source / space（与 list_tables 顶层占位一致，
+        # HOME 不暴露）
+        if not path:
+            top_items = self._fetch_top_level_containers() or []
+            nodes: list[CatalogNode] = []
+            for item in top_items:
+                if item.get("containerType") not in {"SOURCE", "SPACE"}:
+                    continue
+                ipath = list(item.get("path") or [])
+                name = ipath[-1] if ipath else item.get("name") or ""
+                if not name:
+                    continue
+                if keyword and keyword not in name.lower():
+                    continue
+                nodes.append(CatalogNode(
+                    name=name, node_type="namespace", path=[name], metadata=None,
+                ))
+            return nodes
+
+        # path 非空：用 by-path 端点拿单节点 id，再 _iter_children 拿子层
+        encoded = "/".join(urllib.parse.quote(s, safe="") for s in path)
+        try:
+            detail = self._request("GET", f"/api/v3/catalog/by-path/{encoded}")
+        except BeelinkAPIError as exc:
+            logger.warning("beelink ls by-path 失败 path=%s: %s", path, exc)
+            return []
+        node_id = (detail or {}).get("id")
+        if not node_id:
+            return []
+
+        nodes: list[CatalogNode] = []
+        for child in self._iter_children(node_id):
+            ctype = child.get("type")
+            cpath: list[str] = list(child.get("path") or [])
+            if not cpath:
+                continue
+            leaf_name = cpath[-1]
+            if keyword and keyword not in leaf_name.lower():
+                continue
+            if ctype == "DATASET":
+                full = ".".join(cpath)
+                nodes.append(CatalogNode(
+                    name=leaf_name, node_type="table", path=cpath,
+                    metadata={
+                        "row_count": None,
+                        "columns": [],
+                        "_source_name": full,
+                        "table_key": full,
+                    },
+                ))
+            elif ctype in self._CONTAINER_TYPES:
+                nodes.append(CatalogNode(
+                    name=leaf_name, node_type="namespace", path=cpath,
+                    metadata=None,
+                ))
+            # FILE / FUNCTION 等 POC 阶段忽略
+        return nodes
+
     # ── Catalog tree ──────────────────────────────────────────
     #
     # 覆写框架版以按每张表的真实 beelink path 现搭多级 namespace 节点。
@@ -422,12 +523,19 @@ class BeelinkDataLoader(ExternalDataLoader):
                         "path": list(cumulative),
                         "metadata": None,
                         "children": OrderedDict(),
+                        "lazy": False,
                     }
                     cursor[seg] = node
+                else:
+                    # 之前可能是 lazy 顶层占位，现在又拿到深表条目，
+                    # 升级为 eager namespace（带 children）
+                    node["lazy"] = False
                 cursor = node["children"]
             return cursor
 
         for t in tables:
+            meta_t = t.get("metadata") or {}
+            is_lazy_ns = bool(meta_t.get("_lazy_namespace"))
             segments = list(t.get("path") or [])
             if not segments:
                 # 回退：缓存里旧记录无 path 字段时按点分 name 还原
@@ -435,6 +543,21 @@ class BeelinkDataLoader(ExternalDataLoader):
                 if not raw:
                     continue
                 segments = raw.split(".")
+
+            if is_lazy_ns:
+                # 顶层 lazy 占位：输出 namespace 节点，children 字段缺失，
+                # 前端 VirtualizedCatalogTree 据此触发 onLazyExpand 拉子层。
+                name = segments[-1]
+                if name not in root:
+                    root[name] = {
+                        "name": name,
+                        "node_type": "namespace",
+                        "path": list(segments),
+                        "metadata": None,
+                        "children": OrderedDict(),
+                        "lazy": True,
+                    }
+                continue
 
             orig_name = t.get("name") or ".".join(segments)
             meta = t.get("metadata")
@@ -464,13 +587,17 @@ class BeelinkDataLoader(ExternalDataLoader):
             result: list[dict] = []
             for node in cursor.values():
                 if node.get("node_type") == "namespace":
-                    result.append({
+                    out: dict[str, Any] = {
                         "name": node["name"],
                         "node_type": "namespace",
                         "path": node["path"],
                         "metadata": None,
-                        "children": _materialize(node["children"]),
-                    })
+                    }
+                    # lazy 占位不输出 children；前端 children===undefined
+                    # 时显示展开箭头并在点击时触发 onLazyExpand。
+                    if not node.get("lazy"):
+                        out["children"] = _materialize(node["children"])
+                    result.append(out)
                 else:
                     result.append(node)
             return result
