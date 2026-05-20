@@ -511,6 +511,10 @@ class DataAgent:
         # POC-2B: 保留 identity_id 供 query_beelink_sql tool handler 在
         # user-scoped DATA_CONNECTORS 中查找当前用户的 beelink connector
         self._identity_id = identity_id
+        # POC-2C-lite: 本轮会话内 query_beelink_sql 去重缓存
+        # key=(connector_id, 归一化 SQL)，value=上次成功的 result dict；
+        # 命中即跳过 beelink 真实执行，避免重复中间表（如 _2/_3）。
+        self._beelink_sql_cache: dict[tuple[str, str], dict] = {}
 
         from data_formulator.agents.reasoning_log import (
             ReasoningLogger, _NullReasoningLogger,
@@ -2138,6 +2142,15 @@ class DataAgent:
         if not cid:
             return ("query_beelink_sql failed: connector_id is required", "error")
 
+        # POC-2C-lite: 同 (connector_id, 归一化 SQL) 在本轮已成功执行过则直接复用上次结果。
+        # 归一化策略只折叠空白 + 去末尾分号，刻意保留大小写与引号（Dremio 列名敏感）。
+        sql_fp = " ".join(sql.split()).rstrip(";").rstrip()
+        cache_key = (cid, sql_fp)
+        cached = self._beelink_sql_cache.get(cache_key)
+        if cached is not None:
+            payload = {"status": "ok", "reused": True, **cached}
+            return (_json.dumps(payload, ensure_ascii=False), "ok")
+
         # 用 DataAgent 自身 identity 拼 user-scoped key（DataAgent ctor 已收到 identity_id）
         identity = self._identity_id_for_connector_lookup()
         connector = None
@@ -2167,6 +2180,8 @@ class DataAgent:
                 table_name=table_name,
                 import_options={"size": max_rows},
             )
+            # 仅缓存成功结果；失败留给 LLM 自修后重试（避免把错误结果钉死）
+            self._beelink_sql_cache[cache_key] = dict(result)
             # 喂回 LLM 的是 JSON 字符串，让下一轮 LLM 引用 result.table_name 时不歧义
             payload = {"status": "ok", **result}
             return (_json.dumps(payload, ensure_ascii=False), "ok")
