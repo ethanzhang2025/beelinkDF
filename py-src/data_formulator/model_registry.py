@@ -94,6 +94,27 @@ class ModelRegistry:
                     "provider_display": provider,
                     "supports_vision": not is_likely_text_only_model(model_name),
                 }
+        self._maybe_autoenable_deepseek()
+
+    def _maybe_autoenable_deepseek(self) -> None:
+        """``DEEPSEEK_API_KEY`` 存在但用户未显式 ``DEEPSEEK_ENABLED=true`` 时，
+        自动把 ``deepseek-chat`` 注册成全局模型，避免用户在浏览器输入 key。"""
+        api_key = os.getenv("DEEPSEEK_API_KEY", "").strip()
+        if not api_key:
+            return
+        model_id = self.make_id("deepseek", "deepseek-chat")
+        if model_id in self._models:
+            return  # 用户已显式配置过，尊重原值
+        self._models[model_id] = {
+            "id": model_id,
+            "endpoint": "openai",
+            "model": "deepseek-chat",
+            "api_key": api_key,
+            "api_base": "https://api.deepseek.com",
+            "api_version": "",
+            "provider_display": "deepseek",
+            "supports_vision": False,
+        }
 
     def get_config(self, model_id: str) -> Optional[dict]:
         """Return the full config (including credentials) for a global model."""

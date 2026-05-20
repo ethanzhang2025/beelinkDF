@@ -180,7 +180,7 @@ declare module '@mui/material/styles' {
     }
 }
 
-export const toolName = "Data Formulator"
+export const toolName = "智能问数"
 
 const LANGUAGE_LABELS: Record<string, string> = {
     en: 'EN',
@@ -794,40 +794,12 @@ const AppShell: FC = () => {
             }}>
                 <AppBar position="static">
                     <Toolbar variant="dense" sx={{ height: 40, minHeight: 36, position: 'relative', pl: '0px !important' }}>
-                        <Box sx={{ width: 40, minWidth: 40, display: 'flex', justifyContent: 'center', alignItems: 'center' }}>
-                            <Box component="img" sx={{ height: 20 }} alt="" src={dfLogo} />
-                        </Box>
-                        <Button sx={{
-                            display: "flex", flexDirection: "row", textTransform: "none",
-                            alignItems: 'stretch',
-                            backgroundColor: 'transparent',
-                            minWidth: 0,
-                            px: 0.5,
-                            "&:hover": {
-                                backgroundColor: "transparent"
-                            }
-                        }} color="inherit">
-                            <Typography noWrap component="h1" sx={{ fontWeight: 300, display: { xs: 'none', sm: 'block' }, letterSpacing: '0.03em' }}>
+                        {/* beelink 产品化外壳：去 logo / 去 About / App / Gallery / MSR 文案 */}
+                        <Box sx={{ pl: 2 }}>
+                            <Typography noWrap component="h1" sx={{ fontWeight: 400, display: { xs: 'none', sm: 'block' }, letterSpacing: '0.03em', fontSize: '1rem' }}>
                                 {toolName}
                             </Typography>
-                        </Button>
-                        <Box
-                            sx={{
-                                ml: 2,
-                                height: '28px',
-                                my: 'auto',
-                                display: 'flex',
-                            }}
-                        >
-                            <TopNavButton to="/about" label={t('appBar.about')} selected={isAboutPage} />
-                            <TopNavButton to="/app" label={t('appBar.app')} selected={isAppPage} />
-                            <TopNavButton to="/gallery" label={t('appBar.gallery')} selected={isGalleryPage} />
                         </Box>
-                        {tables.length === 0 && !activeWorkspace && (
-                            <Typography noWrap sx={{ position: 'absolute', left: '50%', transform: 'translateX(-50%)', fontWeight: 500, fontSize: '0.65rem', color: 'text.disabled', letterSpacing: '0.15em', textTransform: 'uppercase' }}>
-                                {t('appBar.microsoftResearch')}
-                            </Typography>
-                        )}
                         {/* Centered workspace name — acts as session indicator/switcher */}
                         {activeWorkspace && isAppPage && (
                             <Box sx={{ position: 'absolute', left: '50%', transform: 'translateX(-50%)', display: 'flex', alignItems: 'center' }}>
@@ -837,8 +809,7 @@ const AppShell: FC = () => {
                         {isAppPage && (
                             <Box sx={{ display: 'flex', ml: 'auto', fontSize: 14, alignItems: 'center' }}>
                                 <LanguageSwitcher />
-                                <ConfigDialog />
-                                <Divider orientation="vertical" variant="middle" flexItem />
+                                {/* beelink 产品化：去 ConfigDialog，统一到模型设置入口 */}
                                 <ModelSelectionButton />
                                 {activeWorkspace && (
                                     <>
@@ -943,25 +914,7 @@ const AppShell: FC = () => {
                                 </Tooltip>
                             </Box>
                         )}
-                        {isAppPage && (
-                            <Tooltip title={t('appBar.viewOnGitHub')}>
-                                <Button
-                                    component="a"
-                                    href="https://github.com/microsoft/data-formulator"
-                                    target="_blank"
-                                    rel="noopener noreferrer"
-                                    sx={{
-                                        minWidth: 'auto',
-                                        color: 'inherit',
-                                        '&:hover': {
-                                            backgroundColor: 'rgba(0, 0, 0, 0.04)'
-                                        }
-                                    }}
-                                >
-                                    <GitHubIcon fontSize="medium" />
-                                </Button>
-                            </Tooltip>
-                        )}
+                        {/* beelink 产品化：去 isAppPage 顶部右侧 GitHub 链接 */}
                         <AuthButton />
                     </Toolbar>
                 </AppBar>

@@ -617,25 +617,8 @@ export const DataFormulatorFC = ({ }) => {
         </Box>
     );
 
-    let footer = <Box sx={{ color: 'text.secondary', display: 'flex', 
-            backgroundColor: 'rgba(255, 255, 255, 0.89)',
-            alignItems: 'center', justifyContent: 'center' }}>
-        <Button size="small" color="inherit" 
-            sx={{ textTransform: 'none'}} 
-            target="_blank" rel="noopener noreferrer" 
-            href="https://www.microsoft.com/en-us/privacy/privacystatement">{t('footer.privacyCookies')}</Button>
-        <Divider orientation="vertical" variant="middle" flexItem sx={{ mx: 1 }} />
-        <Button size="small" color="inherit" 
-            sx={{ textTransform: 'none'}} 
-            target="_blank" rel="noopener noreferrer" 
-            href="https://www.microsoft.com/en-us/legal/intellectualproperty/copyright">{t('footer.termsOfUse')}</Button>
-        <Divider orientation="vertical" variant="middle" flexItem sx={{ mx: 1 }} />
-        <Button size="small" color="inherit" 
-            sx={{ textTransform: 'none'}} 
-            target="_blank" rel="noopener noreferrer" 
-            href="https://github.com/microsoft/data-formulator/issues">{t('footer.contactUs')}</Button>
-        <Typography sx={{ display: 'inline', fontSize: '12px', ml: 1 }}> @ {new Date().getFullYear()}</Typography>
-    </Box>
+    // beelink 产品化：隐藏 Privacy / Terms / Contact / @year footer
+    let footer = null
 
     let dataUploadRequestBox = <Box sx={{
             margin: '4px 4px 4px 8px', 
@@ -647,14 +630,10 @@ export const DataFormulatorFC = ({ }) => {
             flex: 1, minWidth: 0, overflow: 'auto', display: 'flex', flexDirection: 'column', height: '100%',
         }}>
         <Box sx={{margin:'auto', pb: '5%', display: "flex", flexDirection: "column", textAlign: "center", maxWidth: 1024, width: '100%', px: 2, boxSizing: 'border-box' }}>
+            {/* beelink 产品化：去掉 Data Formulator 大水印 + landing.tagline 副标题 */}
             <Box sx={{display: 'flex', mx: 'auto'}}>
-                <Typography fontSize={84} sx={{ml: 2, letterSpacing: '0.05em'}}>{toolName}</Typography> 
+                <Typography fontSize={48} sx={{ml: 2, letterSpacing: '0.05em', color: theme.palette.text.primary}}>{toolName}</Typography>
             </Box>
-            <Typography sx={{ 
-                fontSize: 24, color: theme.palette.text.secondary, 
-                textAlign: 'center', mb: 2}}>
-                {t('landing.tagline')}
-            </Typography>
 
             {/* Hosted-demo notice — borderless strip (it's prose, not a
                 button) placed before the Import Data section. The rocket
@@ -981,30 +960,23 @@ export const DataFormulatorFC = ({ }) => {
                         {t('app.cancel')}
                     </Button>
                 </Backdrop>
+                {/* beelink 产品化：没选 model 时显示简洁提示（不再用大水印 backdrop 阻挡视图）。
+                    服务端注入 DEEPSEEK_API_KEY 后，list-global-models 会自动注册 deepseek-chat，
+                    dfSlice.tsx:1611 会把 selectedModelId 自动设到第一个全局模型，所以正常进入时
+                    这层根本不渲染；仅在用户主动清除 selection 时才作为一行小提示出现。 */}
                 {selectedModelId == undefined && (
                     <Box sx={{
                         position: 'absolute',
-                        top: 0,
-                        left: 0,
-                        right: 0,
-                        bottom: 0,
-                        backgroundColor: alpha(theme.palette.background.default, 0.85),
-                        backdropFilter: 'blur(4px)',
-                        display: 'flex',
-                        flexDirection: 'column',
+                        top: 0, left: 0, right: 0, bottom: 0,
+                        backgroundColor: alpha(theme.palette.background.default, 0.6),
+                        display: 'flex', alignItems: 'flex-start', justifyContent: 'center',
+                        pointerEvents: 'none',
                         zIndex: 1000,
                     }}>
-                        <Box sx={{margin:'auto', pb: '5%', display: "flex", flexDirection: "column", textAlign: "center"}}>
-                            <Box component="img" sx={{  width: 196, margin: "auto" }} alt="Data Formulator logo" src={dfLogo} fetchPriority="high" />
-                            <Typography variant="h3" sx={{marginTop: "20px", fontWeight: 200, letterSpacing: '0.05em'}}>
-                                {toolName}
-                            </Typography>
-                            <Typography  variant="h4" sx={{mt: 3, fontSize: 28, letterSpacing: '0.02em'}}>
-                                {t('landing.firstSelectModelPrefix')} <ModelSelectionButton />
-                            </Typography>
-                            <Typography  color="text.secondary" variant="body1" sx={{mt: 2, width: 600}}>💡 {t('landing.modelTip')}</Typography>
+                        <Box sx={{mt: 6, pointerEvents: 'auto', backgroundColor: theme.palette.background.paper, px: 2, py: 1, borderRadius: 1, boxShadow: 1, display: 'flex', alignItems: 'center', gap: 1}}>
+                            <Typography variant="body2">{t('landing.firstSelectModelPrefix')}</Typography>
+                            <ModelSelectionButton />
                         </Box>
-                        {footer}
                     </Box>
                 )}
             </DndProvider>
