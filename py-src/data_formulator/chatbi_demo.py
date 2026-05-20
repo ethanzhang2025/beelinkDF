@@ -417,6 +417,18 @@ _CHATBI_HTML = r"""<!DOCTYPE html>
       labelCol: columns[0], valueCol: columns[1]
     };
   }
+  // headline 单位推测：根据数值列名（典型来自 SUM/COUNT 的 alias）猜中文量词
+  // 未命中返空字符串，宁可不加也不要错配（如订单数加"人"）
+  function inferUnit(valueCol) {
+    if (!valueCol) return '';
+    var v = String(valueCol).toLowerCase();
+    if (/(customer_count|customer_cnt|user_count|user_cnt|people_count|客户数|用户数|人数)/.test(v)) return ' 人';
+    if (/(order_count|order_cnt|orders|订单数|单数|笔数)/.test(v)) return ' 单';
+    if (/(amount|sales|revenue|gmv|金额|销售额|营收)/.test(v)) return ' 元';
+    if (/(quantity|qty|件数|数量)/.test(v)) return ' 件';
+    return '';
+  }
+
   // 通用字段含义推测（无表名/字段名硬编码）
   function inferColumnPurpose(name) {
     var n = String(name || '').toLowerCase();
@@ -456,7 +468,7 @@ _CHATBI_HTML = r"""<!DOCTYPE html>
     stageEl.appendChild(card);
     return Object.assign({}, cfg, {
       card: card, status: status, statusText: statusText, content: content,
-      hasSuccess: false
+      hasSuccess: false, questionText: question
     });
   }
   function renderError(sess, msg) {
@@ -749,10 +761,18 @@ _CHATBI_HTML = r"""<!DOCTYPE html>
       var cols = ((found && found.columns) || []).map(function (c) { return c.name; });
       if (!rows.length) throw new Error('未读到聚合结果样例行');
 
+      // 条目化 headline：从原问题文本推单位（"客户数"→人 / "订单数"→单 / ...）
+      // cnt 列名本身没有语义，所以单位推测以问题文本为准
+      var unit = inferUnit(sess.questionText || '') || inferUnit(field) || '';
+      var top = rows.slice(0, 10);
+      var headlineText = top.map(function (r) {
+        return String(r[field]) + ' ' + r['cnt'] + unit;
+      }).join('，') + '。';
+
       renderResultCard(sess, {
         title: '📊 按 ' + field + ' 统计数量',
-        headline: '自动选择表：' + sess.source + '.' + table + ' · 共 ' + rows.length + ' 个分组',
-        meta: '走 /api/connectors/import-sql（不经 DataAgent）· 字段定位通过遍历 catalog schema',
+        headline: headlineText,
+        meta: '自动选择表：' + sess.source + '.' + table + ' · 共 ' + rows.length + ' 个分组 · 走 /api/connectors/import-sql（不经 DataAgent）',
         sql: sql,
         columns: cols, rows: rows, limit: 200
       });
@@ -826,7 +846,8 @@ _CHATBI_HTML = r"""<!DOCTYPE html>
       var cols = (found.columns || []).map(function (c) { return c.name; });
       var chartCfg = maybeChart(cols, found.sample_rows);
       if (chartCfg) {
-        var unit = /cnt|count|num|qty|total/i.test(chartCfg.valueCol) ? ' 人' : '';
+        // 单位按 valueCol 语义推测；未命中 → 不加单位，避免"订单数 2041 人"这种错配
+        var unit = inferUnit(chartCfg.valueCol);
         headlineSlot.textContent = chartCfg.labels.map(function (lab, i) {
           return String(lab) + ' ' + chartCfg.values[i] + unit;
         }).join('，') + '。';
