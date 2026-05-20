@@ -104,56 +104,46 @@ export const DataFormulatorFC = ({ }) => {
     }, [focusedId, tables, dispatch]);
 
     // ChatBI → DF 原生：消费 `/?ws=<id>&table=<name>` 把 chatbi 落到 workspace 的结果表挂进 store。
-    // 1) 若 URL 指定 ws 且与 activeWorkspace 不一致：先切到该 workspace（loadWorkspace 拿历史 state，
-    //    没拿到就空 session 化），并清掉 ws 参数。activeWorkspace 改变后 useEffect 重跑；
-    // 2) 等到 ws 对齐 / activeWorkspace 就绪后：dispatch loadWorkspaceTableByName 把表挂进 store；
-    // 3) 用 ref 防同名表重复加载（避免 useEffect 重入）；加载完无论成败 history.replaceState 清 table。
-    const chatbiTableHandledRef = useRef<string | null>(null);
+    // 用一次 IIFE 把"切 workspace → 加载表 → 清 URL"做成原子串行，避免靠 useEffect 重跑驱动状态机
+    // 导致的 race（旧实现 step1 dispatch loadState 后偶尔不触发 step2，落到 tables.length===0 的
+    // landing 主区，UI 误以为还要选数据源）。chatbiHandledRef 标记一次性消费。
+    const chatbiHandledRef = useRef(false);
     useEffect(() => {
+        if (chatbiHandledRef.current) return;
         if (typeof window === 'undefined') return;
         const params = new URLSearchParams(window.location.search);
         const wantWs = params.get('ws');
         const wantName = params.get('table');
         if (!wantName) return;
+        chatbiHandledRef.current = true;
 
-        // 第 1 步：workspace 对齐
-        if (wantWs && (!activeWorkspace || activeWorkspace.id !== wantWs)) {
-            (async () => {
-                try {
-                    const result = await loadWorkspace(wantWs);
-                    if (result && Object.keys(result.state).length > 0) {
-                        dispatch(dfActions.loadState({ ...result.state, activeWorkspace: { id: wantWs, displayName: result.displayName } }));
-                    } else {
-                        dispatch(dfActions.setActiveWorkspace({ id: wantWs, displayName: wantWs }));
+        (async () => {
+            try {
+                if (wantWs && (!activeWorkspace || activeWorkspace.id !== wantWs)) {
+                    try {
+                        const result = await loadWorkspace(wantWs);
+                        if (result && Object.keys(result.state).length > 0) {
+                            dispatch(dfActions.loadState({ ...result.state, activeWorkspace: { id: wantWs, displayName: result.displayName } }));
+                        } else {
+                            dispatch(dfActions.resetForNewWorkspace({ id: wantWs, displayName: wantWs }));
+                        }
+                    } catch (e) {
+                        console.warn('[chatbi] 切换 workspace 失败:', wantWs, e);
+                        dispatch(dfActions.resetForNewWorkspace({ id: wantWs, displayName: wantWs }));
                     }
-                } catch (e) {
-                    console.warn('[chatbi] 切换 workspace 失败:', wantWs, e);
-                    dispatch(dfActions.setActiveWorkspace({ id: wantWs, displayName: wantWs }));
                 }
+                await dispatch(loadWorkspaceTableByName(wantName))
+                    .unwrap()
+                    .catch((err) => {
+                        console.warn('[chatbi] 加载结果表失败:', wantName, err);
+                    });
+            } finally {
                 const url = new URL(window.location.href);
                 url.searchParams.delete('ws');
+                url.searchParams.delete('table');
                 window.history.replaceState({}, '', url.toString());
-            })();
-            return;
-        }
-
-        // 第 2 步：activeWorkspace 就绪后加载表
-        if (!activeWorkspace) return;
-        if (chatbiTableHandledRef.current === wantName) return;
-        chatbiTableHandledRef.current = wantName;
-
-        const clearTableQuery = () => {
-            const url = new URL(window.location.href);
-            url.searchParams.delete('table');
-            window.history.replaceState({}, '', url.toString());
-        };
-
-        dispatch(loadWorkspaceTableByName(wantName))
-            .unwrap()
-            .catch((err) => {
-                console.warn('[chatbi] 加载结果表失败:', wantName, err);
-            })
-            .finally(clearTableQuery);
+            }
+        })();
     }, [activeWorkspace, dispatch]);
 
     // ── Connector instances (for landing page menu) ─────────────
