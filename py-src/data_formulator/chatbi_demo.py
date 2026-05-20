@@ -560,6 +560,124 @@ _CHATBI_HTML = r"""<!DOCTYPE html>
   }
 
   // ========================================================================
+  // 第 4 类：simple_aggregate —— "按 X 统计/分组/分布" 通用聚合（不调 LLM）
+  // ========================================================================
+  function isSimpleAggregateIntent(q) {
+    if (!q) return false;
+    return /按\s*[A-Za-z_][A-Za-z0-9_]*\s*(?:统计|分组|分布|分类)/.test(q)
+        || /[A-Za-z_][A-Za-z0-9_]*\s*(?:分布|占比)/.test(q)
+        || /(?:统计|聚合).{0,4}[A-Za-z_][A-Za-z0-9_]*\s*(?:数量|数|count)/i.test(q);
+  }
+  function extractGroupByField(q) {
+    // "按 <field> 统计/分组/分布/分类"
+    var m = q.match(/按\s*([A-Za-z_][A-Za-z0-9_]*)\s*(?:统计|分组|分布|分类)/);
+    if (m) return m[1];
+    // "<field> 分布/占比"
+    m = q.match(/([A-Za-z_][A-Za-z0-9_]*)\s*(?:分布|占比)/);
+    if (m) return m[1];
+    // "按 <field>" 兜底
+    m = q.match(/按\s*([A-Za-z_][A-Za-z0-9_]*)/);
+    if (m) return m[1];
+    return null;
+  }
+  // 给 LLM-free 路径用：拿 source 下所有表（带运行时缓存）
+  async function ensureTables(sess) {
+    if (state.tables.length > 0) return state.tables;
+    var tables = await fetchSourceTables(sess);
+    state.tables = tables.slice();
+    return tables;
+  }
+  // 检索"含字段 field 的表名列表"——并发对每张表调 preview-data 看 columns
+  async function findTablesContainingField(sess, field) {
+    var tables = await ensureTables(sess);
+    var probes = tables.map(function (t) {
+      return fetchPreview(sess, t)
+        .then(function (pv) {
+          var hit = (pv.columns || []).some(function (c) { return c.name === field; });
+          return hit ? t : null;
+        })
+        .catch(function () { return null; });
+    });
+    var settled = await Promise.all(probes);
+    return settled.filter(function (x) { return !!x; });
+  }
+  async function runSimpleAggregate(sess, field) {
+    setStatus(sess, '查找含字段「' + field + '」的表…');
+    try {
+      await fetch('/api/connectors', {
+        method: 'GET',
+        headers: { 'X-Identity-Id': sess.identity, 'X-Workspace-Id': sess.workspace }
+      });
+      var hits = await findTablesContainingField(sess, field);
+      if (hits.length === 0) {
+        setStatus(sess, '未找到字段', 'fail');
+        renderError(sess, '当前 source `' + sess.source + '` 下未找到字段「' + field + '」。');
+        return;
+      }
+      if (hits.length > 1) {
+        var card = el('div', {class: 'card'});
+        card.appendChild(el('div', {class: 'card-head clarify',
+          text: '❓ 字段「' + field + '」出现在多张表'}));
+        var body = el('div', {class: 'card-body'});
+        body.appendChild(el('div', {text: '请在问题里指定表名，例如：按 ' + field + ' 统计 ' + hits[0] + ' 表中数量。'}));
+        body.appendChild(el('div', {class: 'meta', text: '候选表：' + hits.join(', ')}));
+        card.appendChild(body); sess.content.appendChild(card);
+        setStatus(sess, '需要澄清', 'done');
+        return;
+      }
+
+      var table = hits[0];
+      var sql = 'SELECT "' + field + '", COUNT(*) AS cnt FROM "' + sess.source + '"."' + table + '" GROUP BY "' + field + '" ORDER BY cnt DESC';
+      setStatus(sess, '在 beelink 执行聚合 SQL…');
+      // 用 POC-1.5 端点 /api/connectors/import-sql 跑聚合并落 workspace
+      // table_name 取确定性命名，便于复用排查；workspace 自动 _2/_3 后缀去重
+      var outName = '__agg_' + sess.source + '_' + table + '_by_' + field;
+      var resp = await fetch('/api/connectors/import-sql', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json',
+                   'X-Identity-Id': sess.identity, 'X-Workspace-Id': sess.workspace },
+        body: JSON.stringify({
+          connector_id: sess.connectorId,
+          sql: sql,
+          table_name: outName,
+          import_options: { size: 10000 }
+        })
+      });
+      if (!resp.ok) {
+        var bodyText = await resp.text();
+        throw new Error('import-sql HTTP ' + resp.status + ': ' + bodyText.slice(0, 300));
+      }
+      var json = await resp.json();
+      var data = (json && json.data) || {};
+      var savedName = data.table_name || outName;
+      // 从 list-tables 拿 sample_rows（含真实数据）
+      var ltResp = await fetch('/api/tables/list-tables', {
+        method: 'GET',
+        headers: { 'X-Identity-Id': sess.identity, 'X-Workspace-Id': sess.workspace }
+      });
+      var ltJson = await ltResp.json();
+      var tables2 = (ltJson && ltJson.data && ltJson.data.tables) || [];
+      var found = tables2.find(function (t) { return t.name === savedName; });
+      var rows = (found && found.sample_rows) || [];
+      var cols = ((found && found.columns) || []).map(function (c) { return c.name; });
+      if (!rows.length) throw new Error('未读到聚合结果样例行');
+
+      renderResultCard(sess, {
+        title: '📊 按 ' + field + ' 统计数量',
+        headline: '自动选择表：' + sess.source + '.' + table + ' · 共 ' + rows.length + ' 个分组',
+        meta: '走 /api/connectors/import-sql（不经 DataAgent）· 字段定位通过遍历 catalog schema',
+        sql: sql,
+        columns: cols, rows: rows, limit: 200
+      });
+      sess.hasSuccess = true;
+      setStatus(sess, '完成', 'done');
+    } catch (e) {
+      setStatus(sess, '出错', 'fail');
+      renderError(sess, String(e && e.message || e));
+    }
+  }
+
+  // ========================================================================
   // DataAgent 分支：分析问题
   // ========================================================================
   // 工具 → 状态行文案
@@ -790,6 +908,10 @@ _CHATBI_HTML = r"""<!DOCTYPE html>
         var tName2 = extractTableName(question, cfg.source);
         if (tName2) { await runDescribeTable(sess, tName2); setBusy(false, '完成'); return; }
         // 未识别出表名 → 退回 DataAgent
+      }
+      if (isSimpleAggregateIntent(question)) {
+        var field = extractGroupByField(question);
+        if (field) { await runSimpleAggregate(sess, field); setBusy(false, '完成'); return; }
       }
       if (isListTablesIntent(question)) {
         await runListTables(sess); setBusy(false, '完成'); return;
