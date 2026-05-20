@@ -909,12 +909,25 @@ _CHATBI_HTML = r"""<!DOCTYPE html>
     var card = el('div', {class: 'card'});
     card.appendChild(el('div', {class: 'card-head final', text: '💬 最终回答'}));
     var body = el('div', {class: 'card-body'});
-    var c = evt.content;
-    var text = '';
-    if (typeof c === 'string') text = c;
-    else if (c && typeof c === 'object') text = c.thought || c.answer || c.summary || '';
-    if (text.length > 1000) text = text.slice(0, 1000) + '…（已截断，详见调试详情）';
-    body.appendChild(el('div', {text: text || '(无文本回答)'}));
+    // 本轮若已有结构化 SQL/路由结果（hasSuccess=true），LLM 自由文本可能与
+    // 表格/图表数字不一致（幻觉）。展示层直接降级为固定中文指引，原始
+    // LLM 文本通过 debugLog 保留在调试详情里以便排查。
+    if (sess.hasSuccess) {
+      body.appendChild(el('div', {text: '根据上方查询结果，详情请见表格与图表。'}));
+      try {
+        var c0 = evt && evt.content;
+        var raw = typeof c0 === 'string' ? c0
+                : (c0 && typeof c0 === 'object' ? (c0.thought || c0.answer || c0.summary || JSON.stringify(c0)) : '');
+        if (raw) debugLog('  [llm-final suppressed] ' + String(raw).slice(0, 400));
+      } catch (e) { /* 调试日志失败可忽略 */ }
+    } else {
+      var c = evt.content;
+      var text = '';
+      if (typeof c === 'string') text = c;
+      else if (c && typeof c === 'object') text = c.thought || c.answer || c.summary || '';
+      if (text.length > 1000) text = text.slice(0, 1000) + '…（已截断，详见调试详情）';
+      body.appendChild(el('div', {text: text || '(无文本回答)'}));
+    }
     card.appendChild(body);
     sess.content.appendChild(card);
   }
